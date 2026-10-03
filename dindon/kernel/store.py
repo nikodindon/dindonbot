@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import json
 import sqlite3
@@ -11,6 +12,7 @@ from typing import Any
 from .events import Event
 from .ids import new_id, utc_now
 from .tasks import (
+    Approval,
     TASK_TRANSITIONS,
     RecoveryAction,
     Step,
@@ -20,7 +22,7 @@ from .tasks import (
     TERMINAL_STATES,
 )
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _EVENT_NAMES = {
     TaskState.WAITING_APPROVAL: "task.waiting_approval",
     TaskState.WAITING_INPUT: "task.waiting_input",
@@ -140,6 +142,26 @@ class TaskStore:
                 )
                 self._db.execute("CREATE INDEX steps_task_idx ON steps(task_id, idx)")
                 self._db.execute("PRAGMA user_version = 2")
+
+        if version < 3:
+            with self._transaction():
+                self._db.execute(
+                    """CREATE TABLE approvals (
+                        id TEXT PRIMARY KEY,
+                        task_id TEXT NOT NULL REFERENCES tasks(id),
+                        step_id TEXT NOT NULL UNIQUE REFERENCES steps(id),
+                        action_summary TEXT NOT NULL,
+                        action_hash TEXT NOT NULL,
+                        state TEXT NOT NULL CHECK (state IN ('pending', 'granted', 'denied', 'expired', 'revoked')),
+                        requested_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        decided_at TEXT,
+                        decided_by TEXT,
+                        channel TEXT
+                    )"""
+                )
+                self._db.execute("CREATE INDEX approvals_task_state ON approvals(task_id, state)")
+                self._db.execute("PRAGMA user_version = 3")
 
     class _Transaction:
         def __init__(self, store: TaskStore) -> None:
@@ -269,6 +291,175 @@ class TaskStore:
             self._append_event(event)
             updated = self._db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._task_from_row(updated)
+
+    def request_approval(
+        self,
+        *,
+        task_id: str,
+        step_id: str,
+        action_summary: str,
+        action_hash: str,
+        source: str,
+        expires_in_s: int = 600,
+    ) -> Approval:
+        """Persist a human approval and pause its task atomically."""
+        if not action_summary.strip() or not action_hash or expires_in_s <= 0:
+            raise ValueError("approval summary, hash, and positive expiry are required")
+        now_dt = datetime.now(UTC)
+        requested_at = now_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        expires_at = (now_dt + timedelta(seconds=expires_in_s)).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+        approval = Approval(
+            id=new_id("apr"),
+            task_id=task_id,
+            step_id=step_id,
+            action_summary=action_summary,
+            action_hash=action_hash,
+            state="pending",
+            requested_at=requested_at,
+            expires_at=expires_at,
+        )
+        with self._transaction():
+            task = self._db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            step = self._db.execute(
+                "SELECT task_id, kind, state FROM steps WHERE id = ?", (step_id,)
+            ).fetchone()
+            if task is None or step is None or step["task_id"] != task_id:
+                raise KeyError("task or approval step not found")
+            if TaskState(task["state"]) != TaskState.RUNNING:
+                raise ValueError("approvals can only be requested for a running task")
+            if step["kind"] != "tool" or step["state"] != StepState.INTENT.value:
+                raise ValueError("approval must refer to a pending tool intent")
+            self._db.execute(
+                """INSERT INTO approvals
+                   (id, task_id, step_id, action_summary, action_hash, state,
+                    requested_at, expires_at, decided_at, decided_by, channel)
+                   VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, NULL, NULL, NULL)""",
+                (
+                    approval.id,
+                    task_id,
+                    step_id,
+                    action_summary,
+                    action_hash,
+                    requested_at,
+                    expires_at,
+                ),
+            )
+            self._db.execute(
+                "UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?",
+                (TaskState.WAITING_APPROVAL.value, requested_at, task_id),
+            )
+            self._append_event(Event.create(
+                type="approval.requested",
+                source=source,
+                correlation_id=task_id,
+                subject=approval.id,
+                payload={
+                    "task_id": task_id,
+                    "step_id": step_id,
+                    "action_hash": action_hash,
+                    "action_summary": action_summary,
+                    "expires_at": expires_at,
+                },
+                timestamp=requested_at,
+            ))
+            self._append_event(Event.create(
+                type="task.waiting_approval",
+                source=source,
+                correlation_id=task_id,
+                subject=task_id,
+                payload={"from": TaskState.RUNNING.value, "to": TaskState.WAITING_APPROVAL.value},
+                timestamp=requested_at,
+            ))
+        return approval
+
+    def get_approval_for_step(self, step_id: str) -> Approval | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM approvals WHERE step_id = ?", (step_id,)
+            ).fetchone()
+        return None if row is None else self._approval_from_row(row)
+
+    def get_approval(self, approval_id: str) -> Approval | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+        return None if row is None else self._approval_from_row(row)
+
+    def list_pending_approvals(self) -> list[Approval]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM approvals WHERE state = 'pending' ORDER BY requested_at, id"
+            ).fetchall()
+        return [self._approval_from_row(row) for row in rows]
+
+    def decide_approval(
+        self,
+        approval_id: str,
+        *,
+        approved: bool,
+        source: str,
+        channel: str = "cli",
+    ) -> tuple[Approval, Task]:
+        """Record a human decision and resume the task in one transaction."""
+        with self._transaction():
+            row = self._db.execute(
+                "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Approval not found: {approval_id}")
+            if row["state"] != "pending":
+                raise ValueError(f"approval is already {row['state']}")
+            task = self._db.execute(
+                "SELECT * FROM tasks WHERE id = ?", (row["task_id"],)
+            ).fetchone()
+            if task is None:
+                raise KeyError(f"Task not found: {row['task_id']}")
+            if TaskState(task["state"]) != TaskState.WAITING_APPROVAL:
+                raise ValueError("approval task is not waiting for a decision")
+
+            now_dt = datetime.now(UTC)
+            decided_at = now_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            expires_dt = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+            state = "expired" if now_dt >= expires_dt else ("granted" if approved else "denied")
+            self._db.execute(
+                """UPDATE approvals SET state = ?, decided_at = ?, decided_by = 'user', channel = ?
+                   WHERE id = ?""",
+                (state, decided_at, channel, approval_id),
+            )
+            self._db.execute(
+                "UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?",
+                (TaskState.RUNNING.value, decided_at, row["task_id"]),
+            )
+            self._append_event(Event.create(
+                type=f"approval.{state}",
+                source=source,
+                correlation_id=row["task_id"],
+                subject=approval_id,
+                payload={"task_id": row["task_id"], "step_id": row["step_id"], "channel": channel},
+                timestamp=decided_at,
+            ))
+            self._append_event(Event.create(
+                type="task.resumed",
+                source=source,
+                correlation_id=row["task_id"],
+                subject=row["task_id"],
+                payload={
+                    "from": TaskState.WAITING_APPROVAL.value,
+                    "to": TaskState.RUNNING.value,
+                    "approval_id": approval_id,
+                },
+                timestamp=decided_at,
+            ))
+            updated_approval = self._db.execute(
+                "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+            updated_task = self._db.execute(
+                "SELECT * FROM tasks WHERE id = ?", (row["task_id"],)
+            ).fetchone()
+        return self._approval_from_row(updated_approval), self._task_from_row(updated_task)
 
     def start_step(
         self,
@@ -543,4 +734,20 @@ class TaskStore:
             causation_id=row["causation_id"],
             payload=json.loads(row["payload"]),
             schema_version=row["schema_version"],
+        )
+
+    @staticmethod
+    def _approval_from_row(row: sqlite3.Row) -> Approval:
+        return Approval(
+            id=row["id"],
+            task_id=row["task_id"],
+            step_id=row["step_id"],
+            action_summary=row["action_summary"],
+            action_hash=row["action_hash"],
+            state=row["state"],
+            requested_at=row["requested_at"],
+            expires_at=row["expires_at"],
+            decided_at=row["decided_at"],
+            decided_by=row["decided_by"],
+            channel=row["channel"],
         )

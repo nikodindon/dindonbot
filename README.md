@@ -634,11 +634,11 @@ dindonbot/
 Premières briques présentes : `dindon/kernel/ids.py` fournit les identifiants typés,
 `dindon/kernel/tasks.py` décrit les états et transitions d'une tâche, et
 `dindon/kernel/store.py` persiste les tâches et leur journal d'événements dans SQLite.
-Le runtime sait poursuivre les réponses du modèle après un appel `list_dir`, dont
-l'intention et le résultat sont checkpointés. Le Gardien n'autorise que les listes
-de noms visibles dans le workspace ; le volume Docker est monté en lecture seule.
-La lecture du contenu, les écritures, le shell, le bac à sable et les approbations
-restent à implémenter.
+Le runtime sait poursuivre les réponses du modèle après des appels d'outils checkpointés.
+Le Gardien autorise `list_dir` dans le workspace et demande une approbation ponctuelle
+avant `read_file`. Ce dernier est limité à 64 Kio, masque plusieurs formats connus
+de secrets et marque le résultat comme contenu non fiable. Le volume Docker est en
+lecture seule ; l'écriture, le shell et leur sandbox restent à implémenter.
 
 ---
 
@@ -657,9 +657,9 @@ Quatre générations : **Assistant, Agent, Équipe, Compagnon**. Chaque phase pr
 - [x] Client LLM compatible OpenAI, découverte du modèle et streaming SSE
 - [ ] Validation de l'inférence sur le modèle local de référence (Qwen 3.6 35B MoE)
 - [x] Boucle modèle/outils initiale : `list_dir` en lecture seule, avec décision du Gardien
-- [ ] Outils shell, lecture/écriture de fichiers et git ; sandbox isolé et approbations CLI
+- [ ] Outils shell, écriture de fichiers et git ; sandbox isolé
 - [x] **Task Engine initial** : tâches en SQLite, checkpoints de modèle, reprise explicite via le CLI
-- [ ] Approbations minimales en CLI
+- [x] Approbations CLI ponctuelles, liées au hachage d'un appel et expirant après 10 minutes
 - [x] CLI initial : `dindon chat`, `dindon task run/list/resume`
 - [ ] Premier cas d'usage réel : « lance les tests de mon dépôt et résume les échecs »
 
@@ -799,7 +799,7 @@ dindon task list
 dindon task run chief "résume le rôle de SQLite dans ce projet"
 ```
 
-Le CLI n'accepte pour l'instant que des endpoints LLM sur la machine locale. `chat` sert aux conversations simples ; `task run` peut aussi utiliser `list_dir`, l'unique outil actif, après décision du Gardien.
+Le CLI n'accepte pour l'instant que des endpoints LLM sur la machine locale. `chat` sert aux conversations simples ; `task run` peut utiliser `list_dir` et `read_file`. Une lecture de fichier met la tâche en attente jusqu'à une décision explicite.
 
 ```bash
 git clone https://github.com/nikodindon/dindonbot.git
@@ -811,7 +811,12 @@ docker compose build
 docker compose run --rm dindon chat chief
 docker compose run --rm dindon task run chief "résume le rôle de SQLite dans ce projet"
 docker compose run --rm dindon task run chief "Liste les dossiers visibles à la racine du workspace"
+docker compose run --rm dindon task run chief "Lis README.md et résume le projet"
+docker compose run --rm dindon task approvals
+docker compose run --rm dindon task approve apr_ID
 ```
+
+Une approbation acceptée reprend immédiatement la tâche ; `task deny <identifiant>` la reprend en refusant l'action. Le contenu filtré lu est conservé dans le checkpoint local de la tâche.
 
 La base persistante est dans le volume Docker `dindonbot_dindon-data`. Le démarrage comme daemon, les commandes `doctor`, `onboard` et la création de Bots sont prévus, mais pas encore implémentés.
 

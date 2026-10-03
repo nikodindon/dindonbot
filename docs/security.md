@@ -279,7 +279,7 @@ Limite connue : la teinte est grossière (niveau tâche). Un découpage plus fin
 | Images | Versions épinglées par condensat (`@sha256:`), signées, reconstruites par CI |
 | Secrets | Fichiers montés en `tmpfs` ou gestionnaire dédié, pas de variables d'environnement pour les valeurs sensibles |
 
-**État du prototype :** le seul outil actif, `list_dir`, s'exécute dans le conteneur Dindon durci avec le workspace monté en lecture seule. Il ne renvoie que les noms visibles et le Gardien refuse les chemins cachés ou hors workspace. Les outils qui lisent du contenu ou exécutent des commandes restent désactivés jusqu'à la disponibilité d'un conteneur sandbox distinct et des approbations nécessaires.
+**État du prototype :** `list_dir` et `read_file` s'exécutent dans le conteneur Dindon durci avec le workspace monté en lecture seule. Le Gardien refuse les chemins cachés ou hors workspace. `read_file` demande une approbation par appel, limite la taille et masque plusieurs formats courants de secrets avant de sauvegarder ou d'envoyer le texte au modèle local ; ce filtre par motifs n'est pas exhaustif, et le résultat est marqué non fiable. Les commandes et écritures restent désactivées jusqu'à la disponibilité d'un conteneur sandbox distinct et des approbations nécessaires.
 
 ### 7.2 Réseau
 
@@ -467,5 +467,6 @@ Les tests de sécurité font partie de la CI, au même titre que les tests de co
 8. **Rétention des enregistrements de sessions navigateur** : durée et chiffrement par défaut.
 9. **Isolation du Gardien** : conteneur séparé suffit-il, ou faut-il une machine distincte à terme ?
 10. **Mode foyer** : modèle d'isolation entre utilisateurs à concevoir avant toute implémentation.
+11. **Filtrage des secrets pour `read_file`** : le filtre par motifs courants suffit-il, ou faut-il exiger une classification/scanner plus strict avant d'élargir les types de fichiers accessibles ?
 
 Chaque question tranchée est consignée dans `docs/decisions.md`.

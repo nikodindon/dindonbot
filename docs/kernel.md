@@ -773,7 +773,7 @@ class GuardianDecision:
 
 **Phase 0 :** le Gardien est une **implémentation en processus** du même protocole que le futur service séparé. Le kernel n'a ainsi aucun changement à subir quand le Gardien devient un conteneur à part (phase 1).
 
-L'implémentation initiale du runtime propose uniquement `list_dir` : le Gardien refuse les chemins hors workspace, les chemins cachés et tout argument hors schéma. L'outil renvoie les noms visibles, jamais le contenu des fichiers. Les autres outils restent refusés tant que leur exécution isolée et leur flux d'approbation ne sont pas disponibles.
+L'implémentation initiale du runtime propose `list_dir` et `read_file` : le Gardien refuse les chemins hors workspace, les chemins cachés et tout argument hors schéma. `list_dir` renvoie les noms visibles. `read_file` est limité à 64 Kio, demande une approbation `this_call` et renvoie un résultat marqué non fiable après masquage de formats connus de secrets. Le hachage d'action couvre le nom et la version de l'outil ainsi que ses arguments. Les commandes et écritures restent refusées tant que leur exécution isolée n'est pas disponible.
 
 ---
 

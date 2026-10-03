@@ -6,7 +6,7 @@ DindonBot is at the start of phase 0. `README.md` is the product and architectur
 
 ## Development and Validation
 
-The package metadata is in `pyproject.toml`; there are no runtime dependencies or test suite yet. The task runtime supports a Guardian-gated, read-only `list_dir` tool; shell and file-content tools are not implemented. Run the deterministic development endpoint with `python -m dindon.llm.fake_server`. `docker compose build` builds the CLI image; `docker compose run --rm dindon chat chief` starts a session against the configured local OpenAI-compatible endpoint. CI checks package installation and Python syntax. The daemon, sandbox, and unimplemented `dindon` subcommands shown in README remain planned. For documentation contributions, inspect the rendered Markdown, verify links and heading anchors, and confirm examples agree across the README and specifications.
+The package metadata is in `pyproject.toml`; there are no runtime dependencies or test suite yet. The task runtime supports Guardian-gated `list_dir` and approval-gated `read_file`, with CLI approval/denial and resume; shell and write tools await an isolated sandbox. Run the deterministic development endpoint with `python -m dindon.llm.fake_server`. `docker compose build` builds the CLI image; `docker compose run --rm dindon chat chief` starts a session against the configured local OpenAI-compatible endpoint. CI checks package installation and Python syntax. The daemon, sandbox, and unimplemented `dindon` subcommands shown in README remain planned. For documentation contributions, inspect the rendered Markdown, verify links and heading anchors, and confirm examples agree across the README and specifications.
 
 ## Writing and Naming
 

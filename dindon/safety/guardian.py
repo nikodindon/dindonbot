@@ -16,7 +16,7 @@ class GuardianDecision:
 
 
 class LocalGuardian:
-    """Allow directory listings only when they stay inside the task workspace."""
+    """Apply the initial workspace listing and file-reading policy."""
 
     def __init__(self, workspace: str | Path) -> None:
         self.workspace = Path(workspace).resolve(strict=True)
@@ -24,9 +24,9 @@ class LocalGuardian:
             raise ValueError("workspace must be an existing directory")
 
     def decide(self, tool: str, args: dict[str, Any]) -> GuardianDecision:
-        if tool != "list_dir":
+        if tool not in {"list_dir", "read_file"}:
             return GuardianDecision("deny", "tool is not in the read-only allowlist", "default-deny")
-        if set(args) - {"path"}:
+        if set(args) != {"path"} and not (tool == "list_dir" and not args):
             return GuardianDecision("deny", "arguments do not match the tool schema", "workspace-read")
         path = args.get("path", ".")
         if (
@@ -44,6 +44,18 @@ class LocalGuardian:
             return GuardianDecision("deny", "path is missing or outside the task workspace", "workspace-read")
         if any(part.startswith(".") for part in relative_target.parts):
             return GuardianDecision("deny", "hidden paths are not available to tools", "workspace-read")
-        if not target.is_dir():
-            return GuardianDecision("deny", "path is not a directory", "workspace-read")
-        return GuardianDecision("allow", "read-only directory listing inside workspace", "workspace-read")
+        if tool == "list_dir":
+            if not target.is_dir():
+                return GuardianDecision("deny", "path is not a directory", "workspace-read")
+            return GuardianDecision("allow", "read-only directory listing inside workspace", "workspace-read")
+        if not target.is_file():
+            return GuardianDecision("deny", "path is not a regular file", "workspace-read")
+        sensitive_names = (
+            "secret", "credential", "password", "token", "private-key",
+            "id_rsa", "id_ed25519", "keystore", ".pem",
+        )
+        if any(word in part.casefold() for part in relative_target.parts for word in sensitive_names):
+            return GuardianDecision("deny", "sensitive-looking filenames are not available to tools", "workspace-read")
+        return GuardianDecision(
+            "ask", "file contents will be sent to the local model", "file-content-approval"
+        )

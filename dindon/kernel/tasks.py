@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 
 class TaskState(StrEnum):
@@ -31,6 +31,21 @@ class StepState(StrEnum):
     INTENT = "intent"
     DONE = "done"
     FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class Approval:
+    id: str
+    task_id: str
+    step_id: str
+    action_summary: str
+    action_hash: str
+    state: Literal["pending", "granted", "denied", "expired", "revoked"]
+    requested_at: str
+    expires_at: str
+    decided_at: str | None = None
+    decided_by: Literal["user", "policy"] | None = None
+    channel: str | None = None
 
 
 TERMINAL_STATES = frozenset({TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED})

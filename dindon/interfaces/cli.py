@@ -40,6 +40,14 @@ def _parser() -> argparse.ArgumentParser:
     resume = task_commands.add_parser("resume", help="reprendre une tâche persistée")
     resume.add_argument("task_id")
     _add_runtime_options(resume)
+    approvals = task_commands.add_parser("approvals", help="lister les approbations en attente")
+    approvals.add_argument("--database", default=os.environ.get("DINDON_DB", "data/dindon.sqlite"))
+    approve = task_commands.add_parser("approve", help="approuver une action précise et reprendre sa tâche")
+    approve.add_argument("approval_id")
+    _add_runtime_options(approve)
+    deny = task_commands.add_parser("deny", help="refuser une action précise et reprendre sa tâche")
+    deny.add_argument("approval_id")
+    _add_runtime_options(deny)
     return parser
 
 
@@ -208,6 +216,60 @@ def _task_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def _task_approvals(args: argparse.Namespace) -> int:
+    with TaskStore(Path(args.database)) as store:
+        approvals = store.list_pending_approvals()
+    if not approvals:
+        print("Aucune approbation en attente.")
+        return 0
+    for approval in approvals:
+        print(f"{approval.id}  tâche {approval.task_id}  expire {approval.expires_at}")
+        print(f"  {approval.action_summary}")
+    return 0
+
+
+def _task_decide_approval(args: argparse.Namespace, *, approved: bool) -> int:
+    try:
+        client = _local_client(args.base_url)
+        with TaskStore(Path(args.database)) as store:
+            current = store.get_approval(args.approval_id)
+            if current is None:
+                raise KeyError(f"Approval not found: {args.approval_id}")
+            task = store.get_task(current.task_id)
+            if task is None:
+                raise KeyError(f"Task not found: {current.task_id}")
+            steps = store.list_steps(task.id)
+            saved_model = next(
+                (
+                    step.payload.get("model")
+                    for step in reversed(steps)
+                    if step.kind == "model" and isinstance(step.payload.get("model"), str)
+                ),
+                None,
+            )
+            model = args.model or saved_model or _choose_model(client, None)
+            approval, task = store.decide_approval(
+                args.approval_id,
+                approved=approved,
+                source="cli",
+            )
+            engine = TaskEngine(
+                store,
+                client,
+                model=model,
+                source="cli",
+                workspace=task.input.get("workspace", args.workspace),
+            )
+            task, answer = engine.resume(task.id)
+    except Exception as exc:
+        print(f"dindon: {exc}", file=sys.stderr)
+        return 1
+    print(f"Approbation {approval.id} — {approval.state}")
+    print(f"Tâche {task.id} — {task.state.value}")
+    print(answer)
+    return 0
+
+
 def main() -> None:
     args = _parser().parse_args()
     if args.command == "chat":
@@ -220,6 +282,12 @@ def main() -> None:
         result = _task_run(args)
     elif args.command == "task" and args.task_command == "resume":
         result = _task_resume(args)
+    elif args.command == "task" and args.task_command == "approvals":
+        result = _task_approvals(args)
+    elif args.command == "task" and args.task_command == "approve":
+        result = _task_decide_approval(args, approved=True)
+    elif args.command == "task" and args.task_command == "deny":
+        result = _task_decide_approval(args, approved=False)
     else:
         raise AssertionError("unhandled command")
     raise SystemExit(result)
