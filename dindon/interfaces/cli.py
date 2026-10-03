@@ -63,7 +63,8 @@ def _choose_model(client: OpenAICompatibleClient, configured: str | None) -> str
 
 def _local_client(base_url: str) -> OpenAICompatibleClient:
     host = urlsplit(base_url).hostname
-    is_local = host == "localhost"
+    # Compose maps this reserved hostname directly to the host gateway.
+    is_local = host in {"localhost", "host.docker.internal"}
     if host:
         try:
             is_local = is_local or ipaddress.ip_address(host).is_loopback

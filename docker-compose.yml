@@ -1,0 +1,23 @@
+services:
+  dindon:
+    build: .
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DINDON_DB: /data/dindon.sqlite
+      DINDON_LLM_BASE_URL: ${DINDON_LLM_BASE_URL:-http://host.docker.internal:8080}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - dindon-data:/data
+    stdin_open: true
+    tty: true
+
+volumes:
+  dindon-data:

@@ -2,11 +2,11 @@
 
 ## Project Structure
 
-DindonBot is at the start of phase 0. `README.md` is the product and architecture overview. `docs/kernel.md` defines the runtime primitives and invariants, and `docs/security.md` describes the threat model and trust boundaries. Python package code lives under `dindon/`; `dindon/kernel/` contains typed IDs, task and step lifecycle types, event records, and the initial SQLite store. Most source areas, tests, Docker files, and runtime configuration shown in the README are still planned. Keep design material in `docs/` and update the README when decisions change.
+DindonBot is at the start of phase 0. `README.md` is the product and architecture overview. `docs/kernel.md` defines the runtime primitives and invariants, and `docs/security.md` describes the threat model and trust boundaries. Python package code lives under `dindon/`; `dindon/kernel/` contains typed IDs, task and step lifecycle types, event records, and the initial SQLite store. The Dockerfile and Compose configuration package the CLI with persistent SQLite storage; the llama.cpp service, sandbox, daemon, and other runtime areas shown in the README remain planned. Keep design material in `docs/` and update the README when decisions change.
 
 ## Development and Validation
 
-The package metadata is in `pyproject.toml`; there are no runtime dependencies, tool execution, or test suite yet. Run the deterministic development endpoint with `python -m dindon.llm.fake_server`. CI checks package installation and Python syntax. The Docker Compose deployment commands and unimplemented `dindon` subcommands in README are planned. For documentation contributions, inspect the rendered Markdown, verify links and heading anchors, and confirm examples agree across the README and specifications.
+The package metadata is in `pyproject.toml`; there are no runtime dependencies, tool execution, or test suite yet. Run the deterministic development endpoint with `python -m dindon.llm.fake_server`. `docker compose build` builds the CLI image; `docker compose run --rm dindon chat chief` starts a session against the configured local OpenAI-compatible endpoint. CI checks package installation and Python syntax. The daemon, sandbox, and unimplemented `dindon` subcommands shown in README remain planned. For documentation contributions, inspect the rendered Markdown, verify links and heading anchors, and confirm examples agree across the README and specifications.
 
 ## Writing and Naming
 

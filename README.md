@@ -541,86 +541,19 @@ Tout DindonBot tourne dans Docker : **installation en un `docker compose up`, mi
 | `channels` | Passerelles de messagerie et e-mail | Serveur principal |
 | `backup` | Sauvegarde périodique de `data/` vers un autre nœud | Serveur principal |
 
-Profils Compose : `core` (serveur principal), `llm` (nœud d'inférence), `browser` (navigation).
+### Déploiement actuellement disponible
 
-**Exemple de `docker-compose.yml` (à adapter) :**
+Le `Dockerfile` construit le paquet et lance le CLI sous un utilisateur non-root. Compose conserve la base SQLite dans un volume nommé et limite les capacités du conteneur. Le serveur LLM reste indépendant : par défaut, le conteneur contacte `http://host.docker.internal:8080`, configurable dans `.env`.
 
-```yaml
-services:
-  dindon:
-    image: ghcr.io/nikodindon/dindonbot:latest
-    profiles: [core]
-    restart: unless-stopped
-    env_file: .env
-    volumes:
-      - ./data:/data               # mémoire, SQLite, artefacts
-      - ./bots:/app/bots:ro
-      - ./identity:/app/identity
-    depends_on: [llama, sandbox, guardian]
-    healthcheck:
-      test: ["CMD", "dindon", "doctor", "--quick"]
-      interval: 60s
-
-  guardian:
-    image: ghcr.io/nikodindon/dindonbot-guardian:latest
-    profiles: [core]
-    restart: unless-stopped
-    read_only: true
-    volumes:
-      - ./policy:/policy:ro        # règles du Gardien, en lecture seule
-      - ./data/audit:/audit        # journal d'audit
-    networks: [control]
-
-  web:
-    image: ghcr.io/nikodindon/dindonbot:latest
-    command: dindon web
-    profiles: [core]
-    restart: unless-stopped
-    ports: ["127.0.0.1:8700:8700"]   # accès distant via Tailscale uniquement
-    volumes: ["./data:/data"]
-
-  llama:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
-    profiles: [llm, core]
-    restart: unless-stopped
-    environment:
-      LLAMA_ARG_MODEL: /models/${MODEL_FILE}
-      LLAMA_ARG_CTX_SIZE: ${CTX_SIZE:-32768}
-      LLAMA_ARG_N_GPU_LAYERS: ${GPU_LAYERS:-99}
-      # autres réglages d'offload MoE : variables LLAMA_ARG_* ou `command:`
-    volumes: ["./models:/models:ro"]
-    ports: ["8080:8080"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  sandbox:
-    image: ghcr.io/nikodindon/dindonbot-sandbox:latest
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    volumes: ["./workspaces:/workspaces"]
-    networks: [isolated]
-
-  backup:
-    image: ghcr.io/nikodindon/dindonbot-backup:latest
-    profiles: [core]
-    volumes: ["./data:/data:ro"]
-    environment:
-      BACKUP_TARGET: ${BACKUP_TARGET}   # ex. le nœud lab via Tailscale
-
-networks:
-  isolated:
-    internal: true
-  control:
-    internal: true
+```bash
+cp .env.example .env
+docker compose build
+docker compose run --rm dindon chat chief
+docker compose run --rm dindon task run chief "résume le rôle de SQLite dans ce projet"
+docker compose run --rm dindon task list
 ```
 
-*Les noms d'images sont des cibles de publication, pas des artefacts existants. Les variables d'offload de llama.cpp sont à vérifier selon la version utilisée.*
+Le serveur LLM doit accepter les connexions depuis le réseau Docker. Sur Linux, Compose ajoute l’alias `host.docker.internal` vers la passerelle de l’hôte ; configurez le pare-feu pour ne pas rendre le port d’inférence accessible à des machines non fiables. L’image llama.cpp, le Gardien, le bac à sable, le daemon et les interfaces web restent à construire : les services correspondants dans l’architecture cible ne sont pas encore déployables.
 
 **Points à anticiper :**
 
@@ -715,9 +648,11 @@ Quatre générations : **Assistant, Agent, Équipe, Compagnon**. Chaque phase pr
 *Un agent, un nœud, un vrai travail utile, un état qui ne se perd pas.*
 
 - [x] Dépôt, `pyproject.toml`, CI, faux serveur LLM
-- [ ] **Dockerisation dès le départ** : `Dockerfile`, `docker-compose.yml` (dindon, llama, sandbox), `.env.example`
+- [x] Conteneur du CLI : `Dockerfile`, Compose, `.env.example`, volume SQLite persistant ; le LLM local est fourni par l'hôte
+- [ ] Services dédiés pour llama.cpp et le bac à sable isolé
 - [x] Spécification écrite des dix primitives (`docs/kernel.md`) et du modèle de menace (`docs/security.md`)
-- [ ] Client LLM compatible OpenAI branché sur Qwen 3.6 35B MoE
+- [x] Client LLM compatible OpenAI, découverte du modèle et streaming SSE
+- [ ] Validation de l'inférence sur le modèle local de référence (Qwen 3.6 35B MoE)
 - [ ] Boucle d'agent avec `shell`, `read/write/edit_file`, `list_dir`, `git`
 - [x] **Task Engine initial** : tâches en SQLite, checkpoints de modèle, reprise explicite via le CLI
 - [ ] Approbations minimales en CLI
@@ -869,21 +804,12 @@ cd dindonbot
 cp .env.example .env            # modèle, contexte, offload, clés optionnelles (cloud)
 mkdir -p models && cp /chemin/vers/qwen-3.6-35b-moe.gguf models/
 
-docker compose --profile core up -d
-docker compose exec dindon dindon doctor          # nœuds, modèles, permissions
-docker compose exec -it dindon dindon onboard     # première conversation de découverte
-
-docker compose exec dindon dindon bot create code --role "Diagnostic et tests de mes dépôts"
-docker compose exec dindon dindon task run code "lance les tests de mon dépôt et résume les échecs"
+docker compose build
+docker compose run --rm dindon chat chief
+docker compose run --rm dindon task run chief "résume le rôle de SQLite dans ce projet"
 ```
 
-Sur un nœud d'inférence secondaire :
-
-```bash
-docker compose --profile llm up -d
-```
-
-Mise à jour : `docker compose pull && docker compose up -d`
+La base persistante est dans le volume Docker `dindonbot_dindon-data`. Le démarrage comme daemon, les commandes `doctor`, `onboard` et la création de Bots sont prévus, mais pas encore implémentés.
 
 ---
 

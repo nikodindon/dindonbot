@@ -1,0 +1,15 @@
+.git
+.venv
+venv
+__pycache__
+*.py[cod]
+*.egg-info
+build
+dist
+.env
+data
+models
+workspaces
+*.sqlite
+*.sqlite3
+*.db
