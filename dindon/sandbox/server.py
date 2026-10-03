@@ -169,6 +169,8 @@ def _file_hash(path: Path) -> str:
 
 def _workspace_changes(archive_bytes: bytes, root: Path) -> dict[str, object]:
     """Create a bounded, text-only diff from the initial snapshot to command output."""
+    from dindon.tools.workspace import redact_known_secrets
+
     with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
         original = {
             PurePosixPath(info.filename).as_posix(): info
@@ -234,8 +236,6 @@ def _workspace_changes(archive_bytes: bytes, root: Path) -> dict[str, object]:
             except (OSError, UnicodeError):
                 change["detail"] = "binary or unreadable file"
                 continue
-            from dindon.tools.workspace import redact_known_secrets
-
             after_text = redact_known_secrets(after_text)
             before_text = redact_known_secrets(before_text)
             after_bytes = after_text.encode("utf-8")

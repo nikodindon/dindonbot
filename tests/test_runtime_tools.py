@@ -66,6 +66,11 @@ def test_workspace_snapshot_filters_hidden_files_and_produces_bounded_diff(tmp_p
     disposable = tmp_path / "disposable"
     disposable.mkdir()
     _extract_workspace(snapshot, disposable)
+    unchanged = _workspace_changes(snapshot, disposable)
+    assert unchanged["changes"] == []
+    assert unchanged["diff"] == ""
+    assert unchanged["diff_truncated"] is False
+
     (disposable / "README.md").write_text("after\n", encoding="utf-8")
     (disposable / "new.txt").write_text("new file\n", encoding="utf-8")
 
