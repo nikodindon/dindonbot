@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dindonbot"
+version = "0.1.0"
+description = "Assistant IA personnel auto-hébergé"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "TBD" }
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["dindon*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

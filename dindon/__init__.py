@@ -1,0 +1,1 @@
+"""DindonBot core package."""
