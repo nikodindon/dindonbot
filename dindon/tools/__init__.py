@@ -5,6 +5,7 @@ from .workspace import (
     READ_FILE_TOOL,
     SHELL_TOOL,
     list_directory,
+    redact_known_secrets,
     read_text_file,
 )
 from .sandbox import create_workspace_snapshot, run_in_sandbox
@@ -15,6 +16,7 @@ __all__ = [
     "SHELL_TOOL",
     "create_workspace_snapshot",
     "list_directory",
+    "redact_known_secrets",
     "read_text_file",
     "run_in_sandbox",
 ]

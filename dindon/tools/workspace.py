@@ -227,7 +227,9 @@ def run_in_sandbox(
         or not is_local
     ):
         raise ValueError("sandbox URL must point to localhost or the internal sandbox service")
-    encode_header = lambda value: base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii")
+    def encode_header(value: str) -> str:
+        return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii")
+
     request = urllib.request.Request(
         urllib.parse.urljoin(base_url.rstrip("/") + "/", "run"),
         data=archive,

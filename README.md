@@ -608,8 +608,9 @@ dindonbot/
 ├── dindon/
 │   ├── kernel/          # les 10 primitives
 │   ├── runtime/         # boucle d'agent, scheduler, daemon, compaction
+│   ├── sandbox/         # service d'exécution isolé
 │   ├── llm/             # client, router, model lab, tâches de référence
-│   ├── tools/           # shell, fs, git, http, browser, notify
+│   ├── tools/           # list_dir, read_file, shell sandboxé, git futur
 │   ├── connectors/      # couche MCP, manifestes de portées
 │   ├── memory/          # SQLite, embeddings, compaction, consolidation
 │   ├── nodes/           # protocole inter-machines, découverte, santé
@@ -663,6 +664,7 @@ Quatre générations : **Assistant, Agent, Équipe, Compagnon**. Chaque phase pr
 - [ ] Validation de l'inférence sur le modèle local de référence (Qwen 3.6 35B MoE)
 - [x] Boucle modèle/outils initiale : `list_dir` en lecture seule, avec décision du Gardien
 - [x] Outil `shell` isolé derrière une approbation ponctuelle
+- [x] `dindon task diff` pour examiner les changements du snapshot éphémère
 - [ ] Écriture de fichiers et git avec revue des changements
 - [x] **Task Engine initial** : tâches en SQLite, checkpoints de modèle, reprise explicite via le CLI
 - [x] Approbations CLI ponctuelles, liées au hachage d'un appel et expirant après 10 minutes
@@ -823,9 +825,10 @@ docker compose run --rm dindon task approve apr_ID
 docker compose run --rm dindon task run chief "Utilise shell pour lancer python -m compileall -q dindon"
 docker compose run --rm dindon task approvals
 docker compose run --rm dindon task approve apr_ID
+docker compose run --rm dindon task diff tsk_ID
 ```
 
-Une approbation acceptée reprend immédiatement la tâche ; `task deny apr_ID` la reprend en refusant l'action. Le contenu filtré lu et les sorties shell sont conservés dans le checkpoint local de la tâche. Les motifs de secrets connus sont masqués, mais le filtre n'est pas exhaustif. Le sandbox limite une commande à 30 secondes et tronque chaque flux de sortie à 64 Kio.
+Une approbation acceptée reprend immédiatement la tâche ; `task deny apr_ID` la reprend en refusant l'action. `task diff tsk_ID` affiche les changements du snapshot temporaire ; ils ne sont pas appliqués au dépôt. Le contenu filtré lu, les sorties shell et le diff sont conservés dans le checkpoint local de la tâche. Les motifs de secrets connus sont masqués, mais le filtre n'est pas exhaustif. Le sandbox limite une commande à 30 secondes et tronque chaque flux de sortie à 64 Kio.
 
 La base persistante est dans le volume Docker `dindonbot_dindon-data`. Le démarrage comme daemon, les commandes `doctor`, `onboard` et la création de Bots sont prévus, mais pas encore implémentés.
 

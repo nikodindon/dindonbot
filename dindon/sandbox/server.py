@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import difflib
+import hashlib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import io
@@ -23,6 +25,12 @@ _MAX_FILES = 10_000
 _MAX_COMMAND_BYTES = 2_048
 _MAX_OUTPUT_BYTES = 64 * 1024
 _COMMAND_TIMEOUT_S = 30
+_MAX_DIFF_BYTES = 64 * 1024
+_MAX_CHANGED_FILES = 1_000
+_SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "data", "models"}
+_SENSITIVE_NAMES = (
+    "secret", "credential", "password", "token", "private-key", "id_rsa", "id_ed25519", "keystore", ".pem"
+)
 
 
 class RequestError(ValueError):
@@ -141,6 +149,113 @@ def _bounded_process(command: str, cwd: Path, home: Path) -> dict[str, object]:
     }
 
 
+def _is_visible(relative: PurePosixPath) -> bool:
+    return not any(
+        part.startswith(".") or any(word in part.casefold() for word in _SENSITIVE_NAMES)
+        for part in relative.parts
+    )
+
+
+def _file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(64 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _workspace_changes(archive_bytes: bytes, root: Path) -> dict[str, object]:
+    """Create a bounded, text-only diff from the initial snapshot to command output."""
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+        original = {
+            PurePosixPath(info.filename).as_posix(): info
+            for info in archive.infolist()
+            if not info.is_dir() and _is_visible(PurePosixPath(info.filename))
+        }
+        current: dict[str, Path] = {}
+        for directory, dirnames, filenames in os.walk(root, followlinks=False):
+            parent = Path(directory)
+            dirnames[:] = sorted(
+                name
+                for name in dirnames
+                if not name.startswith(".")
+                and name.casefold() not in _SKIP_DIRS
+                and not (parent / name).is_symlink()
+            )
+            for filename in filenames:
+                path = parent / filename
+                relative = PurePosixPath(path.relative_to(root).as_posix())
+                if path.is_symlink() or not _is_visible(relative) or not path.is_file():
+                    continue
+                current[relative.as_posix()] = path
+
+        changes: list[dict[str, str]] = []
+        diff_parts: list[str] = []
+        diff_bytes = 0
+        diff_truncated = False
+        for name in sorted(set(original) | set(current)):
+            before_info = original.get(name)
+            after_path = current.get(name)
+            before_size = 0 if before_info is None else before_info.file_size
+            after_size = 0 if after_path is None else after_path.stat().st_size
+            if before_info is not None and after_path is not None:
+                with archive.open(before_info) as source:
+                    before_digest = hashlib.sha256(source.read()).digest()
+                if before_size == after_size:
+                    try:
+                        if before_digest.hex() == _file_hash(after_path):
+                            continue
+                    except OSError:
+                        pass
+                status = "modified"
+            elif before_info is None:
+                status = "added"
+            else:
+                status = "deleted"
+            if len(changes) < _MAX_CHANGED_FILES:
+                changes.append({"path": name, "status": status})
+            else:
+                diff_truncated = True
+                continue
+
+            if max(before_size, after_size) > 64 * 1024:
+                changes[-1]["detail"] = "file exceeds text diff limit"
+                continue
+            try:
+                before_text = "" if before_info is None else archive.read(before_info).decode("utf-8")
+                after_text = "" if after_path is None else after_path.read_bytes().decode("utf-8")
+            except (OSError, UnicodeError):
+                changes[-1]["detail"] = "binary or unreadable file"
+                continue
+            lines = difflib.unified_diff(
+                before_text.splitlines(keepends=True),
+                after_text.splitlines(keepends=True),
+                fromfile=f"a/{name}" if before_info is not None else "/dev/null",
+                tofile=f"b/{name}" if after_path is not None else "/dev/null",
+            )
+            fragment = "".join(lines)
+            encoded = fragment.encode("utf-8")
+            remaining = _MAX_DIFF_BYTES - diff_bytes
+            if remaining <= 0:
+                diff_truncated = True
+                continue
+            if len(encoded) > remaining:
+                diff_parts.append(encoded[:remaining].decode("utf-8", errors="ignore"))
+                diff_bytes += remaining
+                diff_truncated = True
+            else:
+                diff_parts.append(fragment)
+                diff_bytes += len(encoded)
+
+    from dindon.tools.workspace import redact_known_secrets
+
+    return {
+        "changes": changes,
+        "diff": redact_known_secrets("".join(diff_parts)),
+        "diff_truncated": diff_truncated,
+    }
+
+
 def _execute(archive_bytes: bytes, command: str, cwd_relative: str) -> dict[str, object]:
     if len(archive_bytes) > _MAX_ARCHIVE_BYTES:
         raise RequestError("workspace snapshot exceeds the request size limit")
@@ -159,7 +274,9 @@ def _execute(archive_bytes: bytes, command: str, cwd_relative: str) -> dict[str,
         resolved.relative_to(root)
         if not resolved.is_dir():
             raise RequestError("working directory is not a directory")
-        return _bounded_process(command, resolved, temp_root / "home")
+        result = _bounded_process(command, resolved, temp_root / "home")
+        result.update(_workspace_changes(archive_bytes, root))
+        return result
 
 
 class Handler(BaseHTTPRequestHandler):

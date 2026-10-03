@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Iterator
 import ipaddress
+import json
 import os
 from pathlib import Path
 import sys
@@ -33,6 +34,9 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--database", default=os.environ.get("DINDON_DB", "data/dindon.sqlite"))
     listing = task_commands.add_parser("list", help="lister les tâches")
     listing.add_argument("--database", default=os.environ.get("DINDON_DB", "data/dindon.sqlite"))
+    diff = task_commands.add_parser("diff", help="afficher les changements proposés par le sandbox")
+    diff.add_argument("task_id")
+    diff.add_argument("--database", default=os.environ.get("DINDON_DB", "data/dindon.sqlite"))
     run = task_commands.add_parser("run", help="créer et exécuter une tâche LLM")
     run.add_argument("agent")
     run.add_argument("goal")
@@ -177,6 +181,46 @@ def _task_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _task_diff(args: argparse.Namespace) -> int:
+    with TaskStore(Path(args.database)) as store:
+        task = store.get_task(args.task_id)
+        if task is None:
+            print(f"dindon: Task not found: {args.task_id}", file=sys.stderr)
+            return 1
+        proposals: list[dict[str, object]] = []
+        for step in store.list_steps(task.id):
+            if step.kind != "tool" or not step.result:
+                continue
+            message = step.result.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, str):
+                continue
+            try:
+                result = json.loads(content)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(result, dict) and isinstance(result.get("changes"), list):
+                proposals.append(result)
+    if not proposals:
+        print("Aucun diff de sandbox pour cette tâche.")
+        return 0
+    for index, proposal in enumerate(proposals, start=1):
+        changes = proposal.get("changes", [])
+        if not isinstance(changes, list) or not changes:
+            print(f"Commande sandbox {index} : aucun changement de fichier.")
+            continue
+        print(f"Changements proposés par la commande sandbox {index} :")
+        for change in changes:
+            if isinstance(change, dict):
+                print(f"  {change.get('status', 'changed')}: {change.get('path', '?')} {change.get('detail', '')}")
+        diff_text = proposal.get("diff")
+        if isinstance(diff_text, str) and diff_text:
+            print(diff_text, end="" if diff_text.endswith("\n") else "\n")
+        if proposal.get("diff_truncated") is True:
+            print("[diff tronqué ; la liste des chemins modifiés peut aussi être partielle]")
+    return 0
+
+
 def _task_run(args: argparse.Namespace) -> int:
     try:
         client = _local_client(args.base_url)
@@ -294,6 +338,8 @@ def main() -> None:
         result = _task_create(args)
     elif args.command == "task" and args.task_command == "list":
         result = _task_list(args)
+    elif args.command == "task" and args.task_command == "diff":
+        result = _task_diff(args)
     elif args.command == "task" and args.task_command == "run":
         result = _task_run(args)
     elif args.command == "task" and args.task_command == "resume":
