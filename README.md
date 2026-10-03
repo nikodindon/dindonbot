@@ -588,7 +588,7 @@ Le serveur LLM doit accepter les connexions depuis le réseau Docker. Sur Linux,
 | Navigateur | Playwright (headless), vue en direct |
 | Voix | faster-whisper, Silero VAD, Kokoro, PortAudio (client léger côté hôte) |
 | API et web | FastAPI et HTMX |
-| Tests | pytest, **faux serveur LLM déterministe**, tests de reprise après crash, tâches de référence |
+| Tests | pytest, faux serveur LLM déterministe, tests des garde-fous/checkpoints et du flux d'approbation, tâches de référence |
 | Configuration | TOML et YAML |
 
 Le faux endpoint compatible OpenAI se lance en local avec `python -m dindon.llm.fake_server`
@@ -630,9 +630,7 @@ dindonbot/
 │   ├── security.md      # modèle de menace, gardien, coffre
 │   └── nodes.md
 └── tests/
-    ├── fake_llm/        # serveur LLM factice
-    ├── golden/          # tâches de référence
-    └── e2e/
+    └── test_runtime_tools.py # kernel, Gardien, approbations, sandbox/diff et application
 ```
 
 Premières briques présentes : `dindon/kernel/ids.py` fournit les identifiants typés,
@@ -669,6 +667,7 @@ Quatre générations : **Assistant, Agent, Équipe, Compagnon**. Chaque phase pr
 - [ ] Outils `write_file`, `edit_file` et git natifs avec revue des changements
 - [x] **Task Engine initial** : tâches en SQLite, checkpoints de modèle, reprise explicite via le CLI
 - [x] Approbations CLI ponctuelles, liées au hachage d'un appel et expirant après 10 minutes
+- [x] Tests unitaires du store, du Gardien, des snapshots/diffs et de l'application contrôlée
 - [x] CLI initial : `dindon chat`, `dindon task run/list/resume`
 - [ ] Premier cas d'usage réel : « lance les tests de mon dépôt et résume les échecs »
 
@@ -795,7 +794,8 @@ Quatre générations : **Assistant, Agent, Équipe, Compagnon**. Chaque phase pr
 Installe le paquet en mode éditable et démarre le faux serveur dans un terminal :
 
 ```bash
-python -m pip install -e .
+python -m pip install -e ".[dev]"
+python -m pytest
 python -m dindon.llm.fake_server
 ```
 
