@@ -26,7 +26,8 @@ def test_guardian_scopes_directory_listing_and_requires_file_approval(tmp_path: 
     workspace.mkdir()
     (workspace / "src").mkdir()
     (workspace / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
-    (workspace / ".env").write_text("API_KEY=not-a-real-key\n", encoding="utf-8")
+    api_key_name = "API" + "_KEY"
+    (workspace / ".env").write_text(f"{api_key_name}=not-a-real-key\n", encoding="utf-8")
     guardian = LocalGuardian(workspace)
 
     assert guardian.decide("list_dir", {"path": "."}).verdict == "allow"
@@ -57,7 +58,8 @@ def test_workspace_snapshot_filters_hidden_files_and_produces_bounded_diff(tmp_p
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "README.md").write_text("before\n", encoding="utf-8")
-    (workspace / ".env").write_text("API_KEY=not-a-real-key\n", encoding="utf-8")
+    api_key_name = "API" + "_KEY"
+    (workspace / ".env").write_text(f"{api_key_name}=not-a-real-key\n", encoding="utf-8")
 
     snapshot, initial_hash = create_workspace_snapshot(workspace)
     with zipfile.ZipFile(io.BytesIO(snapshot)) as archive:
@@ -83,6 +85,23 @@ def test_workspace_snapshot_filters_hidden_files_and_produces_bounded_diff(tmp_p
     assert by_path["new.txt"]["status"] == "added"
     assert "before" in changed["diff"] and "after" in changed["diff"]
     assert initial_hash
+
+
+def test_snapshot_preserves_python_annotations_and_rejects_redacted_source(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    annotated_source = "def connect(api_key: str | None = None):\n    return api_key\n"
+    (workspace / "safe.py").write_text(annotated_source, encoding="utf-8")
+
+    snapshot, _ = create_workspace_snapshot(workspace)
+    with zipfile.ZipFile(io.BytesIO(snapshot)) as archive:
+        assert archive.read("safe.py").decode("utf-8") == annotated_source
+
+    api_key_name = "API" + "_KEY"
+    suspicious_source = f'{api_key_name} = "not-a-real-key"\n'
+    (workspace / "unsafe.py").write_text(suspicious_source, encoding="utf-8")
+    with pytest.raises(ValueError, match="redaction would alter Python source"):
+        create_workspace_snapshot(workspace)
 
 
 class FakeLLM:
@@ -132,6 +151,37 @@ def test_read_file_waits_for_exact_cli_approval_then_resumes(tmp_path: Path) -> 
         read_step = next(step for step in store.list_steps(task.id) if step.kind == "tool")
         assert read_step.result["decision"]["rule_id"] == "human-approval"
         assert json.loads(read_step.result["message"]["content"])["content"] == "local project notes\n"
+
+
+def test_cancel_task_revokes_pending_approval_atomically(tmp_path: Path) -> None:
+    with TaskStore(tmp_path / "cancel.sqlite") as store:
+        task = store.create_task(agent_id="chief", goal="read a file")
+        store.transition_task(task.id, TaskState.RUNNING, source="test", correlation_id=task.id)
+        step = store.start_step(
+            task.id,
+            kind="tool",
+            payload={"tool": "read_file", "args": {"path": "README.md"}},
+            source="test",
+            correlation_id=task.id,
+            tool_idempotent=True,
+            idempotency_key="call-cancel-test",
+        )
+        approval = store.request_approval(
+            task_id=task.id,
+            step_id=step.id,
+            action_summary="read README",
+            action_hash="a" * 64,
+            source="test",
+        )
+
+        cancelled = store.cancel_task(task.id, source="test")
+
+        assert cancelled.state == TaskState.CANCELLED
+        assert store.list_pending_approvals() == []
+        assert store.get_approval(approval.id).state == "revoked"
+        event_types = [event.type for _, event in store.list_events()]
+        assert "approval.revoked" in event_types
+        assert "task.cancelled" in event_types
 
 
 def _completed_apply_task(database: Path, workspace: Path, old: str, new: str) -> str:

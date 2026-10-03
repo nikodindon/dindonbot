@@ -74,11 +74,14 @@ _SECRET_PATTERNS = (
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bAKIA[A-Z0-9]{16}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
-    re.compile(
-        r'''(?i)(?:api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)'''
-    ),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b"),
+)
+_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r'''(?i)((?:api[_-]?key|access[_-]?token|password|secret)\s*=\s*)(?:"[^"]*"|'[^']*'|[A-Za-z0-9_./+=:-]{16,})'''
+)
+_SECRET_COLON_PATTERN = re.compile(
+    r'''(?i)((?:api[_-]?key|access[_-]?token|password|secret)\s*:\s*)(?:"[^"]*"|'[^']*'|[A-Za-z0-9_+/=-]{16,})'''
 )
 
 
@@ -86,9 +89,12 @@ def _redact_secret(match: re.Match[str]) -> str:
     return "[REDACTED SECRET]"
 
 
-def redact_known_secrets(content: str) -> str:
+def redact_known_secrets(content: str, *, source_suffix: str | None = None) -> str:
     for pattern in _SECRET_PATTERNS:
         content = pattern.sub(_redact_secret, content)
+    content = _SECRET_ASSIGNMENT_PATTERN.sub(r'\1"[REDACTED SECRET]"', content)
+    if source_suffix != ".py":
+        content = _SECRET_COLON_PATTERN.sub(r'\1"[REDACTED SECRET]"', content)
     return content
 
 
@@ -129,7 +135,7 @@ def read_text_file(workspace: Path, args: dict[str, Any]) -> str:
     if len(raw_content) > MAX_READ_BYTES:
         raise ValueError(f"file exceeds the {MAX_READ_BYTES}-byte reading limit")
     content = raw_content.decode("utf-8")
-    content = redact_known_secrets(content)
+    content = redact_known_secrets(content, source_suffix=target.suffix.casefold())
     return json.dumps(
         {"path": relative, "untrusted": True, "content": content},
         ensure_ascii=False,
@@ -182,7 +188,10 @@ def create_workspace_snapshot(workspace: Path) -> tuple[bytes, str]:
                     text = raw.decode("utf-8")
                 except (OSError, UnicodeError):
                     continue
-                content = redact_known_secrets(text).encode("utf-8")
+                redacted_text = redact_known_secrets(text, source_suffix=path.suffix.casefold())
+                if path.suffix.casefold() == ".py" and redacted_text != text:
+                    raise ValueError(f"secret redaction would alter Python source: {relative}")
+                content = redacted_text.encode("utf-8")
                 count += 1
                 total_bytes += len(content)
                 if count > MAX_SNAPSHOT_FILES or total_bytes > MAX_SNAPSHOT_TOTAL_BYTES:

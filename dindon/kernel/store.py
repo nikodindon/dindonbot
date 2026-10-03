@@ -461,6 +461,92 @@ class TaskStore:
             ).fetchone()
         return self._approval_from_row(updated_approval), self._task_from_row(updated_task)
 
+    def cancel_task(self, task_id: str, *, source: str = "cli") -> Task:
+        """Cancel an active task and revoke its pending approvals atomically."""
+        with self._transaction():
+            task = self._db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if task is None:
+                raise KeyError(f"Task not found: {task_id}")
+            current = TaskState(task["state"])
+            if TaskState.CANCELLED not in TASK_TRANSITIONS[current]:
+                raise ValueError(f"task is already {current.value}")
+            now = utc_now()
+            pending = self._db.execute(
+                "SELECT id, step_id FROM approvals WHERE task_id = ? AND state = 'pending'",
+                (task_id,),
+            ).fetchall()
+            for approval in pending:
+                self._db.execute(
+                    """UPDATE approvals SET state = 'revoked', decided_at = ?,
+                       decided_by = 'user', channel = 'cli' WHERE id = ?""",
+                    (now, approval["id"]),
+                )
+                self._append_event(Event.create(
+                    type="approval.revoked",
+                    source=source,
+                    correlation_id=task_id,
+                    subject=approval["id"],
+                    payload={"task_id": task_id, "step_id": approval["step_id"], "channel": "cli"},
+                    timestamp=now,
+                ))
+            self._db.execute(
+                "UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?",
+                (TaskState.CANCELLED.value, now, task_id),
+            )
+            self._append_event(Event.create(
+                type="task.cancelled",
+                source=source,
+                correlation_id=task_id,
+                subject=task_id,
+                payload={"from": current.value, "to": TaskState.CANCELLED.value},
+                timestamp=now,
+            ))
+            updated = self._db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return self._task_from_row(updated)
+
+    def cancel_task(self, task_id: str, *, source: str = "cli") -> Task:
+        """Cancel an active task and revoke its pending approvals atomically."""
+        with self._transaction():
+            task = self._db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if task is None:
+                raise KeyError(f"Task not found: {task_id}")
+            current = TaskState(task["state"])
+            if TaskState.CANCELLED not in TASK_TRANSITIONS[current]:
+                raise ValueError(f"task is already {current.value}")
+            now = utc_now()
+            pending = self._db.execute(
+                "SELECT id, step_id FROM approvals WHERE task_id = ? AND state = 'pending'",
+                (task_id,),
+            ).fetchall()
+            for approval in pending:
+                self._db.execute(
+                    """UPDATE approvals SET state = 'revoked', decided_at = ?,
+                       decided_by = 'user', channel = 'cli' WHERE id = ?""",
+                    (now, approval["id"]),
+                )
+                self._append_event(Event.create(
+                    type="approval.revoked",
+                    source=source,
+                    correlation_id=task_id,
+                    subject=approval["id"],
+                    payload={"task_id": task_id, "step_id": approval["step_id"], "channel": "cli"},
+                    timestamp=now,
+                ))
+            self._db.execute(
+                "UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?",
+                (TaskState.CANCELLED.value, now, task_id),
+            )
+            self._append_event(Event.create(
+                type="task.cancelled",
+                source=source,
+                correlation_id=task_id,
+                subject=task_id,
+                payload={"from": current.value, "to": TaskState.CANCELLED.value},
+                timestamp=now,
+            ))
+            updated = self._db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return self._task_from_row(updated)
+
     def start_step(
         self,
         task_id: str,

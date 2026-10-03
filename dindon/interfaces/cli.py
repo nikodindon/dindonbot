@@ -48,6 +48,12 @@ def _parser() -> argparse.ArgumentParser:
     apply.add_argument("task_id")
     apply.add_argument("path", help="chemin relatif affiché par 'task diff'")
     apply.add_argument("--database", default=os.environ.get("DINDON_DB", "data/dindon.sqlite"))
+    cancel = task_commands.add_parser("cancel", help="annuler une tâche et révoquer ses approbations")
+    cancel.add_argument("task_id")
+    cancel.add_argument("--database", default=os.environ.get("DINDON_DB", "data/dindon.sqlite"))
+    cancel = task_commands.add_parser("cancel", help="annuler une tâche et révoquer ses approbations")
+    cancel.add_argument("task_id")
+    cancel.add_argument("--database", default=os.environ.get("DINDON_DB", "data/dindon.sqlite"))
     run = task_commands.add_parser("run", help="créer et exécuter une tâche LLM")
     run.add_argument("agent")
     run.add_argument("goal")
@@ -488,6 +494,28 @@ def _task_apply(args: argparse.Namespace) -> int:
     return 0
 
 
+def _task_cancel(args: argparse.Namespace) -> int:
+    try:
+        with TaskStore(Path(args.database)) as store:
+            task = store.cancel_task(args.task_id, source="cli")
+    except Exception as exc:
+        print(f"dindon: {exc}", file=sys.stderr)
+        return 1
+    print(f"Tâche {task.id} — {task.state.value}")
+    return 0
+
+
+def _task_cancel(args: argparse.Namespace) -> int:
+    try:
+        with TaskStore(Path(args.database)) as store:
+            task = store.cancel_task(args.task_id, source="cli")
+    except Exception as exc:
+        print(f"dindon: {exc}", file=sys.stderr)
+        return 1
+    print(f"Tâche {task.id} — {task.state.value}")
+    return 0
+
+
 def _task_run(args: argparse.Namespace) -> int:
     try:
         client = _local_client(args.base_url)
@@ -609,6 +637,10 @@ def main() -> None:
         result = _task_diff(args)
     elif args.command == "task" and args.task_command == "apply":
         result = _task_apply(args)
+    elif args.command == "task" and args.task_command == "cancel":
+        result = _task_cancel(args)
+    elif args.command == "task" and args.task_command == "cancel":
+        result = _task_cancel(args)
     elif args.command == "task" and args.task_command == "run":
         result = _task_run(args)
     elif args.command == "task" and args.task_command == "resume":
