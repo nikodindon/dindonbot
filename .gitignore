@@ -14,3 +14,8 @@ venv/
 data/
 models/
 workspaces/
+*.sqlite
+*.sqlite3
+*.db
+*-wal
+*-shm

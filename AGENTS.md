@@ -2,7 +2,7 @@
 
 ## Project Structure
 
-DindonBot is at the start of phase 0. `README.md` is the product and architecture overview. `docs/kernel.md` defines the runtime primitives and invariants, and `docs/security.md` describes the threat model and trust boundaries. Python package code lives under `dindon/`; the first kernel modules define identifiers and event records. Most source areas, tests, Docker files, and runtime configuration shown in the README are still planned. Keep design material in `docs/` and update the README when decisions change.
+DindonBot is at the start of phase 0. `README.md` is the product and architecture overview. `docs/kernel.md` defines the runtime primitives and invariants, and `docs/security.md` describes the threat model and trust boundaries. Python package code lives under `dindon/`; `dindon/kernel/` contains typed IDs, task and step lifecycle types, event records, and the initial SQLite store. Most source areas, tests, Docker files, and runtime configuration shown in the README are still planned. Keep design material in `docs/` and update the README when decisions change.
 
 ## Development and Validation
 
@@ -18,4 +18,4 @@ Treat `docs/kernel.md` and `docs/security.md` as the current design references. 
 
 ## Commits and Pull Requests
 
-This checkout has no Git metadata, so existing commit-message conventions cannot be verified. Use a short imperative subject that names the change (for example, `Clarify kernel approval invariant`). A pull request should explain the design decision, identify affected documents, link related discussion when available, and note any unresolved questions. Include screenshots only when a rendered visual changed.
+The repository currently has only its initial commit, so no established commit-message convention can be inferred. Use a short imperative subject that names the change (for example, `Clarify kernel approval invariant`). A pull request should explain the design decision, identify affected documents, link related discussion when available, and note any unresolved questions. Include screenshots only when a rendered visual changed.

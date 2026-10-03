@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Version** | 0.1 (brouillon) |
-| **Statut** | À valider avant d'écrire la première ligne de code de la phase 0 |
+| **Statut** | Brouillon évolutif ; les premières briques du kernel sont implémentées sous `dindon/kernel/` |
 | **Portée** | Les dix primitives, leurs invariants, leurs états, leur persistance et leurs tests de conformité |
 | **Hors portée** | Stratégies de prompt, politiques du router, canaux, moteur d'initiative, onboarding, voix, interface (voir [Hors du kernel](#9-hors-du-kernel)) |
 
@@ -175,7 +175,7 @@ pending ─► running ─► verifying ─► succeeded
 
 **Étapes et checkpoints**
 
-Une tâche est une suite d'**étapes** (`Step`). Chaque étape est soit un appel au modèle, soit un appel d'outil. Un **checkpoint** est écrit **après chaque étape**, dans la même transaction que l'événement correspondant.
+Une tâche est une suite d'**étapes** (`Step`). Chaque étape est soit un appel au modèle, soit un appel d'outil. L'intention est persistée avant l'appel ; son résultat est ensuite enregistré comme checkpoint dans la même transaction que l'événement correspondant.
 
 ```python
 @dataclass
@@ -189,7 +189,11 @@ class Step:
     result: dict | None
     started_at: str
     finished_at: str | None
+    tool_idempotent: bool | None   # copie de la propriété au moment de l'intention
+    idempotency_key: str | None    # clé réutilisée lors d'une reprise d'outil
 ```
+
+Le checkpoint d'intention DOIT être persisté avant l'appel externe. Le résultat et son événement DOIVENT ensuite être persistés dans la même transaction. Les payloads et résultats restent sans secret (K4).
 
 **Reprise (K7)**
 
@@ -200,7 +204,7 @@ class Step:
 | `done` | Continuer à l'étape suivante |
 | `intent` d'un appel **modèle** | Relancer l'appel (sans effet de bord) |
 | `intent` d'un outil **idempotent** | Relancer avec la même clé d'idempotence |
-| `intent` d'un outil **non idempotent** | **Ne pas relancer.** Vérifier l'état réel via la sonde de l'outil ; si indéterminé, passer la tâche en `waiting_input` et demander à l'utilisateur |
+| `intent` d'un outil **non idempotent** | **Ne pas relancer.** Vérifier l'état réel via la sonde de l'outil ; si indéterminé, passer la tâche en `waiting_input` et demander à l'utilisateur. Tant que les sondes ne sont pas disponibles, la reprise demande toujours une intervention humaine. |
 
 Ce principe, **écrire l'intention avant, le résultat après**, est la base de la fiabilité du kernel.
 
@@ -631,6 +635,7 @@ CREATE TABLE steps (
   idx INTEGER NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL,
   payload TEXT NOT NULL, result TEXT,
   started_at TEXT NOT NULL, finished_at TEXT,
+  tool_idempotent INTEGER, idempotency_key TEXT,
   UNIQUE (task_id, idx)
 );
 

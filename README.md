@@ -694,6 +694,12 @@ dindonbot/
     └── e2e/
 ```
 
+Premières briques présentes : `dindon/kernel/ids.py` fournit les identifiants typés,
+`dindon/kernel/tasks.py` décrit les états et transitions d'une tâche, et
+`dindon/kernel/store.py` persiste les tâches et leur journal d'événements dans SQLite.
+Le stockage des intentions et résultats d'étapes est en place ; le runtime, les appels
+d'outils protégés par le Gardien et les sondes de reprise restent à implémenter.
+
 ---
 
 ## 11. Roadmap
