@@ -59,6 +59,11 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
         help="racine autorisée pour les outils de workspace (lecture seule)",
     )
     parser.add_argument(
+        "--sandbox-url",
+        default=os.environ.get("DINDON_SANDBOX_URL", "http://127.0.0.1:8787"),
+        help="URL interne du service sandbox",
+    )
+    parser.add_argument(
         "--base-url",
         default=os.environ.get("DINDON_LLM_BASE_URL", "http://127.0.0.1:8080"),
     )
@@ -178,7 +183,12 @@ def _task_run(args: argparse.Namespace) -> int:
         model = _choose_model(client, args.model)
         with TaskStore(Path(args.database)) as store:
             task, answer = TaskEngine(
-                store, client, model=model, source="cli", workspace=args.workspace
+                store,
+                client,
+                model=model,
+                source="cli",
+                workspace=args.workspace,
+                sandbox_url=args.sandbox_url,
             ).run(
                 agent_id=args.agent,
                 goal=args.goal,
@@ -206,7 +216,12 @@ def _task_resume(args: argparse.Namespace) -> int:
             )
             model = args.model or saved_model or _choose_model(client, None)
             task, answer = TaskEngine(
-                store, client, model=model, source="cli", workspace=args.workspace
+                store,
+                client,
+                model=model,
+                source="cli",
+                workspace=args.workspace,
+                sandbox_url=args.sandbox_url,
             ).resume(task.id)
     except Exception as exc:
         print(f"dindon: {exc}", file=sys.stderr)
@@ -259,6 +274,7 @@ def _task_decide_approval(args: argparse.Namespace, *, approved: bool) -> int:
                 model=model,
                 source="cli",
                 workspace=task.input.get("workspace", args.workspace),
+                sandbox_url=args.sandbox_url,
             )
             task, answer = engine.resume(task.id)
     except Exception as exc:

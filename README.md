@@ -543,17 +543,20 @@ Tout DindonBot tourne dans Docker : **installation en un `docker compose up`, mi
 
 ### Déploiement actuellement disponible
 
-Le `Dockerfile` construit le paquet et lance le CLI sous un utilisateur non-root. Compose conserve la base SQLite dans un volume nommé et limite les capacités du conteneur. Le serveur LLM reste indépendant : par défaut, le conteneur contacte `http://host.docker.internal:8080`, configurable dans `.env`.
+Compose lance le CLI Dindon sous un utilisateur non-root et un service sandbox séparé, sans réseau ni volume hôte. Le CLI conserve SQLite dans un volume nommé et monte le workspace en lecture seule. Pour chaque commande approuvée, il envoie au sandbox un snapshot temporaire filtré ; les changements de commande sont jetés à la fin. Le serveur LLM reste indépendant : le conteneur contacte par défaut `http://host.docker.internal:8080`, configurable dans `.env`.
 
 ```bash
 cp .env.example .env
 docker compose build
 docker compose run --rm dindon chat chief
 docker compose run --rm dindon task run chief "résume le rôle de SQLite dans ce projet"
+docker compose run --rm dindon task run chief "Utilise shell pour lancer python -m compileall -q dindon"
+docker compose run --rm dindon task approvals
+docker compose run --rm dindon task approve apr_ID
 docker compose run --rm dindon task list
 ```
 
-Le serveur LLM doit accepter les connexions depuis le réseau Docker. Sur Linux, Compose ajoute l’alias `host.docker.internal` vers la passerelle de l’hôte ; configurez le pare-feu pour ne pas rendre le port d’inférence accessible à des machines non fiables. L’image llama.cpp, le Gardien, le bac à sable, le daemon et les interfaces web restent à construire : les services correspondants dans l’architecture cible ne sont pas encore déployables.
+Le serveur LLM doit accepter les connexions depuis le réseau Docker. Sur Linux, Compose ajoute l’alias `host.docker.internal` vers la passerelle de l’hôte ; configurez le pare-feu pour ne pas rendre le port d'inférence accessible à des machines non fiables. L'image llama.cpp, le Gardien, le daemon et les interfaces web restent à construire.
 
 **Points à anticiper :**
 
@@ -635,10 +638,12 @@ Premières briques présentes : `dindon/kernel/ids.py` fournit les identifiants 
 `dindon/kernel/tasks.py` décrit les états et transitions d'une tâche, et
 `dindon/kernel/store.py` persiste les tâches et leur journal d'événements dans SQLite.
 Le runtime sait poursuivre les réponses du modèle après des appels d'outils checkpointés.
-Le Gardien autorise `list_dir` dans le workspace et demande une approbation ponctuelle
-avant `read_file`. Ce dernier est limité à 64 Kio, masque plusieurs formats connus
-de secrets et marque le résultat comme contenu non fiable. Le volume Docker est en
-lecture seule ; l'écriture, le shell et leur sandbox restent à implémenter.
+Le Gardien autorise `list_dir`, demande une approbation ponctuelle avant `read_file`
+et avant chaque commande `shell`. Les snapshots de commande excluent fichiers cachés,
+binaires et chemins sensibles connus ; le sandbox les exécute sans réseau et détruit
+les changements après l'appel. Les lectures et sorties sont non fiables et passent
+par un masquage non exhaustif de formats connus de secrets. L'écriture du workspace
+source et Git restent à implémenter.
 
 ---
 
@@ -652,12 +657,13 @@ Quatre générations : **Assistant, Agent, Équipe, Compagnon**. Chaque phase pr
 
 - [x] Dépôt, `pyproject.toml`, CI, faux serveur LLM
 - [x] Conteneur du CLI : `Dockerfile`, Compose, `.env.example`, volume SQLite persistant ; le LLM local est fourni par l'hôte
-- [ ] Services dédiés pour llama.cpp et le bac à sable isolé
+- [x] Sandbox séparé sans réseau, snapshot temporaire filtré du workspace
 - [x] Spécification écrite des dix primitives (`docs/kernel.md`) et du modèle de menace (`docs/security.md`)
 - [x] Client LLM compatible OpenAI, découverte du modèle et streaming SSE
 - [ ] Validation de l'inférence sur le modèle local de référence (Qwen 3.6 35B MoE)
 - [x] Boucle modèle/outils initiale : `list_dir` en lecture seule, avec décision du Gardien
-- [ ] Outils shell, écriture de fichiers et git ; sandbox isolé
+- [x] Outil `shell` isolé derrière une approbation ponctuelle
+- [ ] Écriture de fichiers et git avec revue des changements
 - [x] **Task Engine initial** : tâches en SQLite, checkpoints de modèle, reprise explicite via le CLI
 - [x] Approbations CLI ponctuelles, liées au hachage d'un appel et expirant après 10 minutes
 - [x] CLI initial : `dindon chat`, `dindon task run/list/resume`
@@ -799,7 +805,7 @@ dindon task list
 dindon task run chief "résume le rôle de SQLite dans ce projet"
 ```
 
-Le CLI n'accepte pour l'instant que des endpoints LLM sur la machine locale. `chat` sert aux conversations simples ; `task run` peut utiliser `list_dir` et `read_file`. Une lecture de fichier met la tâche en attente jusqu'à une décision explicite.
+Le CLI n'accepte pour l'instant que des endpoints LLM sur la machine locale. `chat` sert aux conversations simples ; `task run` peut utiliser `list_dir`, `read_file` et `shell`. Les lectures de fichier et commandes shell mettent la tâche en attente jusqu'à une décision explicite.
 
 ```bash
 git clone https://github.com/nikodindon/dindonbot.git
@@ -814,9 +820,12 @@ docker compose run --rm dindon task run chief "Liste les dossiers visibles à la
 docker compose run --rm dindon task run chief "Lis README.md et résume le projet"
 docker compose run --rm dindon task approvals
 docker compose run --rm dindon task approve apr_ID
+docker compose run --rm dindon task run chief "Utilise shell pour lancer python -m compileall -q dindon"
+docker compose run --rm dindon task approvals
+docker compose run --rm dindon task approve apr_ID
 ```
 
-Une approbation acceptée reprend immédiatement la tâche ; `task deny <identifiant>` la reprend en refusant l'action. Le contenu filtré lu est conservé dans le checkpoint local de la tâche.
+Une approbation acceptée reprend immédiatement la tâche ; `task deny apr_ID` la reprend en refusant l'action. Le contenu filtré lu et les sorties shell sont conservés dans le checkpoint local de la tâche. Les motifs de secrets connus sont masqués, mais le filtre n'est pas exhaustif. Le sandbox limite une commande à 30 secondes et tronque chaque flux de sortie à 64 Kio.
 
 La base persistante est dans le volume Docker `dindonbot_dindon-data`. Le démarrage comme daemon, les commandes `doctor`, `onboard` et la création de Bots sont prévus, mais pas encore implémentés.
 

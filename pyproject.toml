@@ -14,6 +14,7 @@ dependencies = []
 [project.scripts]
 dindon = "dindon.interfaces.cli:main"
 dindon-fake-llm = "dindon.llm.fake_server:main"
+dindon-sandbox = "dindon.sandbox.server:main"
 
 [tool.setuptools.packages.find]
 include = ["dindon*"]
