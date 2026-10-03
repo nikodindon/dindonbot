@@ -26,6 +26,7 @@ _MAX_COMMAND_BYTES = 2_048
 _MAX_OUTPUT_BYTES = 64 * 1024
 _COMMAND_TIMEOUT_S = 30
 _MAX_DIFF_BYTES = 64 * 1024
+_MAX_APPLY_CONTENT_BYTES = 64 * 1024
 _MAX_CHANGED_FILES = 1_000
 _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "data", "models"}
 _SENSITIVE_NAMES = (
@@ -151,7 +152,9 @@ def _bounded_process(command: str, cwd: Path, home: Path) -> dict[str, object]:
 
 def _is_visible(relative: PurePosixPath) -> bool:
     return not any(
-        part.startswith(".") or any(word in part.casefold() for word in _SENSITIVE_NAMES)
+        part.startswith(".")
+        or not part.isprintable()
+        or any(word in part.casefold() for word in _SENSITIVE_NAMES)
         for part in relative.parts
     )
 
@@ -189,9 +192,10 @@ def _workspace_changes(archive_bytes: bytes, root: Path) -> dict[str, object]:
                     continue
                 current[relative.as_posix()] = path
 
-        changes: list[dict[str, str]] = []
+        changes: list[dict[str, object]] = []
         diff_parts: list[str] = []
         diff_bytes = 0
+        apply_content_bytes = 0
         diff_truncated = False
         for name in sorted(set(original) | set(current)):
             before_info = original.get(name)
@@ -213,20 +217,38 @@ def _workspace_changes(archive_bytes: bytes, root: Path) -> dict[str, object]:
             else:
                 status = "deleted"
             if len(changes) < _MAX_CHANGED_FILES:
-                changes.append({"path": name, "status": status})
+                change: dict[str, object] = {"path": name, "status": status, "applyable": False}
+                changes.append(change)
             else:
                 diff_truncated = True
                 continue
 
             if max(before_size, after_size) > 64 * 1024:
-                changes[-1]["detail"] = "file exceeds text diff limit"
+                change["detail"] = "file exceeds text diff limit"
                 continue
             try:
-                before_text = "" if before_info is None else archive.read(before_info).decode("utf-8")
-                after_text = "" if after_path is None else after_path.read_bytes().decode("utf-8")
+                before_bytes = b"" if before_info is None else archive.read(before_info)
+                after_bytes = b"" if after_path is None else after_path.read_bytes()
+                before_text = before_bytes.decode("utf-8")
+                after_text = after_bytes.decode("utf-8")
             except (OSError, UnicodeError):
-                changes[-1]["detail"] = "binary or unreadable file"
+                change["detail"] = "binary or unreadable file"
                 continue
+            from dindon.tools.workspace import redact_known_secrets
+
+            after_text = redact_known_secrets(after_text)
+            before_text = redact_known_secrets(before_text)
+            after_bytes = after_text.encode("utf-8")
+            change["base_hash"] = None if before_info is None else hashlib.sha256(before_bytes).hexdigest()
+            change["new_hash"] = None if after_path is None else hashlib.sha256(after_bytes).hexdigest()
+            if status != "deleted" and apply_content_bytes + len(after_bytes) <= _MAX_APPLY_CONTENT_BYTES:
+                change["new_content"] = after_text
+                change["applyable"] = True
+                apply_content_bytes += len(after_bytes)
+            elif status == "deleted":
+                change["detail"] = "automatic deletion is disabled"
+            else:
+                change["detail"] = "proposal content exceeds the application limit"
             lines = difflib.unified_diff(
                 before_text.splitlines(keepends=True),
                 after_text.splitlines(keepends=True),
@@ -246,8 +268,6 @@ def _workspace_changes(archive_bytes: bytes, root: Path) -> dict[str, object]:
             else:
                 diff_parts.append(fragment)
                 diff_bytes += len(encoded)
-
-    from dindon.tools.workspace import redact_known_secrets
 
     return {
         "changes": changes,

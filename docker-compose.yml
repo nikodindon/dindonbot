@@ -58,10 +58,32 @@ services:
     networks:
       - sandbox
 
+  applier:
+    image: dindonbot-dindon:latest
+    profiles: [apply]
+    user: "${DINDON_UID:-1000}:${DINDON_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DINDON_DB: /data/dindon.sqlite
+      DINDON_WORKSPACE: /workspace
+    volumes:
+      - dindon-data:/data:ro
+      - .:/workspace:rw
+    networks:
+      - apply-internal
+
 volumes:
   dindon-data:
 
 networks:
   default: {}
   sandbox:
+    internal: true
+  apply-internal:
     internal: true

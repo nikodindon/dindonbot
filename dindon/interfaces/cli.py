@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterator
+from datetime import UTC, datetime
+import hashlib
 import ipaddress
 import json
 import os
 from pathlib import Path
+import sqlite3
+import stat
 import sys
+import tempfile
+import unicodedata
+from urllib.parse import quote
 from urllib.parse import urlsplit
 
 from dindon.kernel import TaskStore
@@ -37,6 +44,10 @@ def _parser() -> argparse.ArgumentParser:
     diff = task_commands.add_parser("diff", help="afficher les changements proposés par le sandbox")
     diff.add_argument("task_id")
     diff.add_argument("--database", default=os.environ.get("DINDON_DB", "data/dindon.sqlite"))
+    apply = task_commands.add_parser("apply", help="appliquer un fichier après revue et confirmation")
+    apply.add_argument("task_id")
+    apply.add_argument("path", help="chemin relatif affiché par 'task diff'")
+    apply.add_argument("--database", default=os.environ.get("DINDON_DB", "data/dindon.sqlite"))
     run = task_commands.add_parser("run", help="créer et exécuter une tâche LLM")
     run.add_argument("agent")
     run.add_argument("goal")
@@ -212,12 +223,268 @@ def _task_diff(args: argparse.Namespace) -> int:
         print(f"Changements proposés par la commande sandbox {index} :")
         for change in changes:
             if isinstance(change, dict):
-                print(f"  {change.get('status', 'changed')}: {change.get('path', '?')} {change.get('detail', '')}")
+                path = _safe_terminal_text(str(change.get("path", "?")))
+                detail = _safe_terminal_text(str(change.get("detail", "")))
+                print(f"  {change.get('status', 'changed')}: {path} {detail}")
         diff_text = proposal.get("diff")
         if isinstance(diff_text, str) and diff_text:
-            print(diff_text, end="" if diff_text.endswith("\n") else "\n")
+            safe_diff = _safe_terminal_text(diff_text)
+            print(safe_diff, end="" if safe_diff.endswith("\n") else "\n")
         if proposal.get("diff_truncated") is True:
             print("[diff tronqué ; la liste des chemins modifiés peut aussi être partielle]")
+    return 0
+
+
+def _safe_terminal_text(value: str) -> str:
+    rendered: list[str] = []
+    for char in value:
+        category = unicodedata.category(char)
+        if char in {"\n", "\t"} or category not in {"Cc", "Cf", "Cs"}:
+            rendered.append(char)
+        elif ord(char) <= 0xFF:
+            rendered.append(f"\\x{ord(char):02x}")
+        else:
+            rendered.append(f"\\u{ord(char):04x}")
+    return "".join(rendered)
+
+
+def _load_apply_proposal(
+    database: str, task_id: str, relative_path: str
+) -> tuple[str, dict[str, object], str, bool]:
+    database_path = Path(database).resolve()
+    uri = f"file:{quote(database_path.as_posix(), safe='/')}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    try:
+        connection.row_factory = sqlite3.Row
+        task = connection.execute(
+            "SELECT state, input_json FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if task is None:
+            raise KeyError(f"Task not found: {task_id}")
+        if task["state"] != "succeeded":
+            raise ValueError("task must be completed before applying a proposal")
+        workspace = json.loads(task["input_json"]).get("workspace")
+        if not isinstance(workspace, str):
+            raise ValueError("task has no saved workspace")
+
+        candidates: list[tuple[dict[str, object], str, bool]] = []
+        rows = connection.execute(
+            "SELECT result FROM steps WHERE task_id = ? AND kind = 'tool' AND state = 'done' ORDER BY idx",
+            (task_id,),
+        ).fetchall()
+        for row in rows:
+            result = json.loads(row["result"] or "{}")
+            decision = result.get("decision")
+            if not isinstance(decision, dict) or decision.get("rule_id") != "human-approval":
+                continue
+            message = result.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, str):
+                continue
+            try:
+                output = json.loads(content)
+            except json.JSONDecodeError:
+                continue
+            changes = output.get("changes") if isinstance(output, dict) else None
+            if not isinstance(changes, list):
+                continue
+            for change in changes:
+                if isinstance(change, dict) and change.get("path") == relative_path:
+                    candidates.append((
+                        change,
+                        str(output.get("diff", "")),
+                        output.get("diff_truncated") is True,
+                    ))
+        if len(candidates) != 1:
+            raise ValueError("expected exactly one approved sandbox proposal for this path")
+        return workspace, candidates[0][0], candidates[0][1], candidates[0][2]
+    finally:
+        connection.close()
+
+
+def _append_apply_audit(workspace: Path, event: dict[str, object]) -> None:
+    audit_dir = workspace / ".dindon"
+    if audit_dir.is_symlink():
+        raise ValueError("application audit path cannot be a symlink")
+    audit_dir.mkdir(mode=0o700, exist_ok=True)
+    audit_file = audit_dir / "applications.jsonl"
+    if audit_file.is_symlink():
+        raise ValueError("application audit file cannot be a symlink")
+    document = json.dumps(event, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    descriptor = os.open(
+        audit_file,
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    with os.fdopen(descriptor, "ab") as output:
+        output.write(document.encode("ascii") + b"\n")
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def _task_apply(args: argparse.Namespace) -> int:
+    try:
+        workspace, change, diff_text, diff_truncated = _load_apply_proposal(
+            args.database, args.task_id, args.path
+        )
+        if diff_truncated:
+            raise ValueError("proposal diff is truncated; create a smaller sandbox change before applying")
+        relative = Path(args.path)
+        parts = relative.parts
+        sensitive_names = (
+            "secret", "credential", "password", "token", "private-key",
+            "id_rsa", "id_ed25519", "keystore", ".pem",
+        )
+        if (
+            not parts
+            or relative.is_absolute()
+            or "\\" in args.path
+            or any(part in {".", ".."} or part.startswith(".") for part in parts)
+            or any(word in part.casefold() for part in parts for word in sensitive_names)
+        ):
+            raise ValueError("proposal path is not allowed")
+        if change.get("applyable") is not True or change.get("status") not in {"added", "modified"}:
+            raise ValueError(f"proposal cannot be applied: {change.get('detail', 'unsupported change')}")
+        new_content = change.get("new_content")
+        new_hash = change.get("new_hash")
+        if not isinstance(new_content, str) or not isinstance(new_hash, str):
+            raise ValueError("proposal has no bounded text content")
+        new_bytes = new_content.encode("utf-8")
+        if len(new_bytes) > 64 * 1024 or hashlib.sha256(new_bytes).hexdigest() != new_hash:
+            raise ValueError("proposal content hash is invalid")
+
+        root = Path(workspace).resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError("saved workspace is not a directory")
+        target = root.joinpath(*parts)
+        parent = target.parent
+        parent_parts = parts[:-1]
+        current = root
+        missing_parents: list[Path] = []
+        for part in parent_parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError("proposal path crosses a symlink")
+            if current.exists():
+                if not current.is_dir():
+                    raise ValueError("proposal parent is not a directory")
+            else:
+                missing_parents.append(current)
+        if target.is_symlink():
+            raise ValueError("proposal target is a symlink")
+
+        status = change["status"]
+        if status == "modified":
+            base_hash = change.get("base_hash")
+            if not target.is_file() or not isinstance(base_hash, str):
+                raise ValueError("source file is missing or is not regular")
+            current_bytes = target.read_bytes()
+            if hashlib.sha256(current_bytes).hexdigest() == new_hash:
+                print("Cette proposition est déjà appliquée.")
+                return 0
+            if hashlib.sha256(current_bytes).hexdigest() != base_hash:
+                raise ValueError("source file changed since the snapshot; create a fresh task")
+            file_mode = stat.S_IMODE(target.stat().st_mode)
+        else:
+            if target.exists():
+                if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == new_hash:
+                    print("Cette proposition est déjà appliquée.")
+                    return 0
+                raise ValueError("new-file target already exists")
+            file_mode = 0o644
+
+        print(f"Fichier proposé : {_safe_terminal_text(args.path)} ({status})")
+        print("Seul ce fichier sera appliqué ; les autres changements restent des propositions.")
+        if diff_text:
+            print(_safe_terminal_text(diff_text), end="" if diff_text.endswith("\n") else "\n")
+        if not sys.stdin.isatty():
+            raise ValueError("application requires an interactive terminal for confirmation")
+        answer = input("Appliquer ce fichier au workspace ? [y/N] ").strip().casefold()
+        if answer not in {"y", "yes", "o", "oui"}:
+            print("Aucun changement appliqué.")
+            return 0
+
+        if Path(workspace).resolve(strict=True) != root:
+            raise ValueError("workspace root changed during confirmation")
+        current = root
+        missing_parents = []
+        for part in parent_parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError("proposal path now crosses a symlink")
+            if current.exists():
+                if not current.is_dir():
+                    raise ValueError("proposal parent is no longer a directory")
+            else:
+                missing_parents.append(current)
+        target = current / parts[-1]
+        parent = target.parent
+        if target.is_symlink():
+            raise ValueError("proposal target became a symlink")
+        if status == "modified":
+            current_hash = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
+            if current_hash == new_hash:
+                print("Cette proposition est déjà appliquée.")
+                return 0
+            if current_hash != change.get("base_hash"):
+                raise ValueError("source file changed during confirmation")
+        elif target.exists():
+            if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == new_hash:
+                print("Cette proposition est déjà appliquée.")
+                return 0
+            raise ValueError("new-file target appeared during confirmation")
+
+        created_dirs: list[Path] = []
+        temporary_name: str | None = None
+        audit_record = {
+            "ts": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "type": "apply.requested",
+            "task_id": args.task_id,
+            "path": args.path,
+            "status": status,
+            "base_hash": change.get("base_hash"),
+            "new_hash": new_hash,
+        }
+        _append_apply_audit(root, audit_record)
+        try:
+            for directory in reversed(missing_parents):
+                directory.mkdir()
+                created_dirs.append(directory)
+            descriptor, temporary_name = tempfile.mkstemp(prefix=".dindon-apply-", dir=parent)
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(new_bytes)
+                output.flush()
+                os.fsync(output.fileno())
+            os.chmod(temporary_name, file_mode)
+            os.replace(temporary_name, target)
+            temporary_name = None
+            directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except Exception:
+            if temporary_name is not None:
+                Path(temporary_name).unlink(missing_ok=True)
+            for directory in created_dirs:
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            _append_apply_audit(root, {**audit_record, "type": "apply.failed"})
+            raise
+        try:
+            _append_apply_audit(root, {**audit_record, "type": "apply.applied"})
+        except OSError as exc:
+            print(
+                f"dindon: fichier appliqué, mais journal incomplet dans .dindon/applications.jsonl: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+    except Exception as exc:
+        print(f"dindon: {exc}", file=sys.stderr)
+        return 1
+    print(f"Fichier appliqué : {_safe_terminal_text(args.path)}")
     return 0
 
 
@@ -340,6 +607,8 @@ def main() -> None:
         result = _task_list(args)
     elif args.command == "task" and args.task_command == "diff":
         result = _task_diff(args)
+    elif args.command == "task" and args.task_command == "apply":
+        result = _task_apply(args)
     elif args.command == "task" and args.task_command == "run":
         result = _task_run(args)
     elif args.command == "task" and args.task_command == "resume":

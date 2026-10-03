@@ -45,6 +45,7 @@ class LocalGuardian:
             or not path
             or len(path) > 4096
             or Path(path).is_absolute()
+            or any(not part.isprintable() for part in PurePosixPath(path).parts)
             or any(part.startswith(".") for part in PurePosixPath(path).parts)
         ):
             return GuardianDecision("deny", "path must be a non-empty workspace-relative path", "workspace-read")

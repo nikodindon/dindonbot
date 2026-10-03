@@ -103,7 +103,7 @@ def list_directory(workspace: Path, args: dict[str, Any]) -> str:
         (
             {"name": item.name, "type": "directory" if item.is_dir() else "file"}
             for item in target.iterdir()
-            if not item.name.startswith(".")
+            if not item.name.startswith(".") and item.name.isprintable()
         ),
         key=lambda item: item["name"].casefold(),
     )
@@ -166,7 +166,10 @@ def create_workspace_snapshot(workspace: Path) -> tuple[bytes, str]:
             for filename in sorted(filenames):
                 path = parent / filename
                 relative = path.relative_to(workspace)
-                if path.is_symlink() or any(part.startswith(".") for part in relative.parts):
+                if (
+                    path.is_symlink()
+                    or any(part.startswith(".") or not part.isprintable() for part in relative.parts)
+                ):
                     continue
                 if any(word in part.casefold() for part in relative.parts for word in _SENSITIVE_NAMES):
                     continue

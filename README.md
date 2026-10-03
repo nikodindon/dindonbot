@@ -665,7 +665,8 @@ Quatre générations : **Assistant, Agent, Équipe, Compagnon**. Chaque phase pr
 - [x] Boucle modèle/outils initiale : `list_dir` en lecture seule, avec décision du Gardien
 - [x] Outil `shell` isolé derrière une approbation ponctuelle
 - [x] `dindon task diff` pour examiner les changements du snapshot éphémère
-- [ ] Écriture de fichiers et git avec revue des changements
+- [x] Application d'un fichier revu, avec confirmation CLI et contrôle du hachage source
+- [ ] Outils `write_file`, `edit_file` et git natifs avec revue des changements
 - [x] **Task Engine initial** : tâches en SQLite, checkpoints de modèle, reprise explicite via le CLI
 - [x] Approbations CLI ponctuelles, liées au hachage d'un appel et expirant après 10 minutes
 - [x] CLI initial : `dindon chat`, `dindon task run/list/resume`
@@ -826,9 +827,10 @@ docker compose run --rm dindon task run chief "Utilise shell pour lancer python 
 docker compose run --rm dindon task approvals
 docker compose run --rm dindon task approve apr_ID
 docker compose run --rm dindon task diff tsk_ID
+docker compose --profile apply run --rm -it applier task apply tsk_ID dindon/runtime/engine.py
 ```
 
-Une approbation acceptée reprend immédiatement la tâche ; `task deny apr_ID` la reprend en refusant l'action. `task diff tsk_ID` affiche les changements du snapshot temporaire ; ils ne sont pas appliqués au dépôt. Le contenu filtré lu, les sorties shell et le diff sont conservés dans le checkpoint local de la tâche. Les motifs de secrets connus sont masqués, mais le filtre n'est pas exhaustif. Le sandbox limite une commande à 30 secondes et tronque chaque flux de sortie à 64 Kio.
+Une approbation acceptée reprend immédiatement la tâche ; `task deny apr_ID` la reprend en refusant l'action. `task diff tsk_ID` affiche les changements du snapshot temporaire. Pour appliquer un fichier, relis le diff puis lance le service ponctuel `applier` : il affiche à nouveau le diff, vérifie que la source n'a pas changé et exige `y` dans un terminal. Il journalise l'application dans `.dindon/applications.jsonl`. Configure `DINDON_UID` et `DINDON_GID` dans `.env` avec les valeurs de `id -u` et `id -g` sur l'hôte. Les suppressions ne sont pas appliquées. Le contenu filtré lu, les sorties shell et le diff sont conservés dans le checkpoint local de la tâche. Les motifs de secrets connus sont masqués, mais le filtre n'est pas exhaustif. Le sandbox limite une commande à 30 secondes et tronque chaque flux de sortie à 64 Kio.
 
 La base persistante est dans le volume Docker `dindonbot_dindon-data`. Le démarrage comme daemon, les commandes `doctor`, `onboard` et la création de Bots sont prévus, mais pas encore implémentés.
 
