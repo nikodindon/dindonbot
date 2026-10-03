@@ -719,9 +719,9 @@ Quatre générations : **Assistant, Agent, Équipe, Compagnon**. Chaque phase pr
 - [x] Spécification écrite des dix primitives (`docs/kernel.md`) et du modèle de menace (`docs/security.md`)
 - [ ] Client LLM compatible OpenAI branché sur Qwen 3.6 35B MoE
 - [ ] Boucle d'agent avec `shell`, `read/write/edit_file`, `list_dir`, `git`
-- [ ] **Task Engine** : tâches en SQLite, checkpoints, reprise
+- [x] **Task Engine initial** : tâches en SQLite, checkpoints de modèle, reprise explicite via le CLI
 - [ ] Approbations minimales en CLI
-- [ ] CLI : `dindon chat`, `dindon task run/list/resume`
+- [x] CLI initial : `dindon chat`, `dindon task run/list/resume`
 - [ ] Premier cas d'usage réel : « lance les tests de mon dépôt et résume les échecs »
 
 **Critère de sortie :** le processus est tué en pleine tâche, relancé, et la tâche reprend.
@@ -857,9 +857,10 @@ Dans un second terminal, le client découvre le modèle du faux serveur et ouvre
 DINDON_LLM_BASE_URL=http://127.0.0.1:8081 dindon chat chief
 dindon task create code "diagnostiquer mon dépôt"
 dindon task list
+dindon task run chief "résume le rôle de SQLite dans ce projet"
 ```
 
-La conversation est une interface LLM simple ; l'exécution de tâches par des outils arrive dans une étape suivante.
+Le CLI n'accepte pour l'instant que des endpoints LLM sur la machine locale. La conversation est une interface LLM simple ; l'exécution de tâches par des outils arrive dans une étape suivante.
 
 ```bash
 git clone https://github.com/nikodindon/dindonbot.git

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterator
+import ipaddress
 import os
 from pathlib import Path
 import sys
+from urllib.parse import urlsplit
 
 from dindon.kernel import TaskStore
 from dindon.llm import OpenAICompatibleClient
+from dindon.runtime import TaskEngine
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -21,7 +24,6 @@ def _parser() -> argparse.ArgumentParser:
     chat.add_argument("prompt", nargs="*")
     chat.add_argument("--base-url", default=os.environ.get("DINDON_LLM_BASE_URL", "http://127.0.0.1:8080"))
     chat.add_argument("--model", default=os.environ.get("DINDON_MODEL"))
-    chat.add_argument("--api-key", default=os.environ.get("DINDON_LLM_API_KEY"))
 
     task = commands.add_parser("task", help="inspecter et créer des tâches persistées")
     task_commands = task.add_subparsers(dest="task_command", required=True)
@@ -31,7 +33,23 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--database", default=os.environ.get("DINDON_DB", "data/dindon.sqlite"))
     listing = task_commands.add_parser("list", help="lister les tâches")
     listing.add_argument("--database", default=os.environ.get("DINDON_DB", "data/dindon.sqlite"))
+    run = task_commands.add_parser("run", help="créer et exécuter une tâche LLM")
+    run.add_argument("agent")
+    run.add_argument("goal")
+    _add_runtime_options(run)
+    resume = task_commands.add_parser("resume", help="reprendre une tâche persistée")
+    resume.add_argument("task_id")
+    _add_runtime_options(resume)
     return parser
+
+
+def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--database", default=os.environ.get("DINDON_DB", "data/dindon.sqlite"))
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("DINDON_LLM_BASE_URL", "http://127.0.0.1:8080"),
+    )
+    parser.add_argument("--model", default=os.environ.get("DINDON_MODEL"))
 
 
 def _choose_model(client: OpenAICompatibleClient, configured: str | None) -> str:
@@ -43,9 +61,26 @@ def _choose_model(client: OpenAICompatibleClient, configured: str | None) -> str
     return models[0]
 
 
+def _local_client(base_url: str) -> OpenAICompatibleClient:
+    host = urlsplit(base_url).hostname
+    is_local = host == "localhost"
+    if host:
+        try:
+            is_local = is_local or ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            pass
+    if not is_local:
+        raise ValueError("the CLI currently permits local LLM endpoints only")
+    return OpenAICompatibleClient(base_url)
+
+
 def _chat(args: argparse.Namespace) -> int:
-    client = OpenAICompatibleClient(args.base_url, api_key=args.api_key)
-    model = _choose_model(client, args.model)
+    try:
+        client = _local_client(args.base_url)
+        model = _choose_model(client, args.model)
+    except Exception as exc:
+        print(f"dindon: {exc}", file=sys.stderr)
+        return 1
     messages: list[dict[str, str]] = [
         {
             "role": "system",
@@ -112,14 +147,54 @@ def _task_create(args: argparse.Namespace) -> int:
 
 def _task_list(args: argparse.Namespace) -> int:
     with TaskStore(Path(args.database)) as store:
-        tasks = store.list_incomplete_tasks()
+        tasks = store.list_tasks()
     if not tasks:
-        print("Aucune tâche en cours.")
+        print("Aucune tâche.")
         return 0
     print(f"{'ID':<30} {'ÉTAT':<18} {'AGENT':<16} OBJECTIF")
     for task in tasks:
         goal = task.goal.replace("\n", " ")
         print(f"{task.id:<30} {task.state.value:<18} {task.agent_id:<16} {goal}")
+    return 0
+
+
+def _task_run(args: argparse.Namespace) -> int:
+    try:
+        client = _local_client(args.base_url)
+        model = _choose_model(client, args.model)
+        with TaskStore(Path(args.database)) as store:
+            task, answer = TaskEngine(store, client, model=model, source="cli").run(
+                agent_id=args.agent,
+                goal=args.goal,
+            )
+    except Exception as exc:
+        print(f"dindon: {exc}", file=sys.stderr)
+        return 1
+    print(f"Tâche {task.id} — {task.state.value}")
+    print(answer)
+    return 0
+
+
+def _task_resume(args: argparse.Namespace) -> int:
+    try:
+        client = _local_client(args.base_url)
+        with TaskStore(Path(args.database)) as store:
+            task = store.get_task(args.task_id)
+            if task is None:
+                raise KeyError(f"Task not found: {args.task_id}")
+            steps = store.list_steps(task.id)
+            saved_model = (
+                steps[-1].payload.get("model")
+                if steps and isinstance(steps[-1].payload.get("model"), str)
+                else None
+            )
+            model = args.model or saved_model or _choose_model(client, None)
+            task, answer = TaskEngine(store, client, model=model, source="cli").resume(task.id)
+    except Exception as exc:
+        print(f"dindon: {exc}", file=sys.stderr)
+        return 1
+    print(f"Tâche {task.id} — {task.state.value}")
+    print(answer)
     return 0
 
 
@@ -131,6 +206,10 @@ def main() -> None:
         result = _task_create(args)
     elif args.command == "task" and args.task_command == "list":
         result = _task_list(args)
+    elif args.command == "task" and args.task_command == "run":
+        result = _task_run(args)
+    elif args.command == "task" and args.task_command == "resume":
+        result = _task_resume(args)
     else:
         raise AssertionError("unhandled command")
     raise SystemExit(result)

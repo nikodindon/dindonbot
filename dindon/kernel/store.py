@@ -447,6 +447,14 @@ class TaskStore:
             row = self._db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return None if row is None else self._task_from_row(row)
 
+    def list_tasks(self) -> list[Task]:
+        """Return all tasks in creation order for CLI inspection."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM tasks ORDER BY created_at, id"
+            ).fetchall()
+        return [self._task_from_row(row) for row in rows]
+
     def list_incomplete_tasks(self) -> list[Task]:
         """Return persisted tasks that are not terminal, for runtime recovery."""
         terminal = tuple(state.value for state in TERMINAL_STATES)

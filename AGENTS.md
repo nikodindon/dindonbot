@@ -6,7 +6,7 @@ DindonBot is at the start of phase 0. `README.md` is the product and architectur
 
 ## Development and Validation
 
-The package metadata is in `pyproject.toml`; there are no runtime dependencies, task runner, or test suite yet. Run the deterministic development endpoint with `python -m dindon.llm.fake_server`. CI checks package installation and Python syntax. The Docker Compose deployment commands and unimplemented `dindon` subcommands in README are planned. For documentation contributions, inspect the rendered Markdown, verify links and heading anchors, and confirm examples agree across the README and specifications.
+The package metadata is in `pyproject.toml`; there are no runtime dependencies, tool execution, or test suite yet. Run the deterministic development endpoint with `python -m dindon.llm.fake_server`. CI checks package installation and Python syntax. The Docker Compose deployment commands and unimplemented `dindon` subcommands in README are planned. For documentation contributions, inspect the rendered Markdown, verify links and heading anchors, and confirm examples agree across the README and specifications.
 
 ## Writing and Naming
 
