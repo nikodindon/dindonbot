@@ -6,7 +6,7 @@ DindonBot is at the start of phase 0. `README.md` is the product and architectur
 
 ## Development and Validation
 
-The package metadata is in `pyproject.toml`; runtime dependencies, an installed CLI, and a test suite have not been added yet. The Docker Compose and `dindon` commands in README describe the intended future deployment and are not currently executable. For documentation contributions, inspect the rendered Markdown, verify links and heading anchors, and confirm examples agree across the README and specifications.
+The package metadata is in `pyproject.toml`; there are no runtime dependencies, task runner, or test suite yet. Run the deterministic development endpoint with `python -m dindon.llm.fake_server`. CI checks package installation and Python syntax. The Docker Compose deployment commands and unimplemented `dindon` subcommands in README are planned. For documentation contributions, inspect the rendered Markdown, verify links and heading anchors, and confirm examples agree across the README and specifications.
 
 ## Writing and Naming
 
@@ -18,4 +18,4 @@ Treat `docs/kernel.md` and `docs/security.md` as the current design references. 
 
 ## Commits and Pull Requests
 
-The repository currently has only its initial commit, so no established commit-message convention can be inferred. Use a short imperative subject that names the change (for example, `Clarify kernel approval invariant`). A pull request should explain the design decision, identify affected documents, link related discussion when available, and note any unresolved questions. Include screenshots only when a rendered visual changed.
+Recent commits use short imperative subjects. Keep that pattern (for example, `Clarify kernel approval invariant`). A pull request should explain the design decision, identify affected documents, link related discussion when available, and note any unresolved questions. Include screenshots only when a rendered visual changed.

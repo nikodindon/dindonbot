@@ -655,6 +655,10 @@ networks:
 | Tests | pytest, **faux serveur LLM déterministe**, tests de reprise après crash, tâches de référence |
 | Configuration | TOML et YAML |
 
+Le faux endpoint compatible OpenAI se lance en local avec `python -m dindon.llm.fake_server`
+(adresse par défaut : `http://127.0.0.1:8081`). `dindon.llm.OpenAICompatibleClient`
+prend en charge `/v1/models`, les complétions de chat JSON et le streaming SSE.
+
 ### Structure du dépôt
 
 ```
@@ -710,9 +714,9 @@ Quatre générations : **Assistant, Agent, Équipe, Compagnon**. Chaque phase pr
 
 *Un agent, un nœud, un vrai travail utile, un état qui ne se perd pas.*
 
-- [ ] Dépôt, `pyproject.toml`, CI, faux serveur LLM
+- [x] Dépôt, `pyproject.toml`, CI, faux serveur LLM
 - [ ] **Dockerisation dès le départ** : `Dockerfile`, `docker-compose.yml` (dindon, llama, sandbox), `.env.example`
-- [ ] Spécification écrite des dix primitives (`docs/kernel.md`) et du modèle de menace (`docs/security.md`) **avant** le code
+- [x] Spécification écrite des dix primitives (`docs/kernel.md`) et du modèle de menace (`docs/security.md`)
 - [ ] Client LLM compatible OpenAI branché sur Qwen 3.6 35B MoE
 - [ ] Boucle d'agent avec `shell`, `read/write/edit_file`, `list_dir`, `git`
 - [ ] **Task Engine** : tâches en SQLite, checkpoints, reprise
@@ -837,6 +841,25 @@ Quatre générations : **Assistant, Agent, Équipe, Compagnon**. Chaque phase pr
 ## 13. Démarrage
 
 *Prérequis : Docker Engine avec Compose v2 ; pour le GPU, pilotes NVIDIA et NVIDIA Container Toolkit.*
+
+### Commandes de développement disponibles
+
+Installe le paquet en mode éditable et démarre le faux serveur dans un terminal :
+
+```bash
+python -m pip install -e .
+python -m dindon.llm.fake_server
+```
+
+Dans un second terminal, le client découvre le modèle du faux serveur et ouvre une conversation :
+
+```bash
+DINDON_LLM_BASE_URL=http://127.0.0.1:8081 dindon chat chief
+dindon task create code "diagnostiquer mon dépôt"
+dindon task list
+```
+
+La conversation est une interface LLM simple ; l'exécution de tâches par des outils arrive dans une étape suivante.
 
 ```bash
 git clone https://github.com/nikodindon/dindonbot.git
