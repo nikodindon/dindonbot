@@ -279,6 +279,8 @@ Limite connue : la teinte est grossière (niveau tâche). Un découpage plus fin
 | Images | Versions épinglées par condensat (`@sha256:`), signées, reconstruites par CI |
 | Secrets | Fichiers montés en `tmpfs` ou gestionnaire dédié, pas de variables d'environnement pour les valeurs sensibles |
 
+**État du prototype :** le seul outil actif, `list_dir`, s'exécute dans le conteneur Dindon durci avec le workspace monté en lecture seule. Il ne renvoie que les noms visibles et le Gardien refuse les chemins cachés ou hors workspace. Les outils qui lisent du contenu ou exécutent des commandes restent désactivés jusqu'à la disponibilité d'un conteneur sandbox distinct et des approbations nécessaires.
+
 ### 7.2 Réseau
 
 - **Tailscale** : ACL par rôle (`main`, `lab`, `client`, `sensor`) ; un téléphone capteur ne peut joindre que le point d'entrée dont il a besoin.

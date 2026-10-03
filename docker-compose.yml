@@ -11,11 +11,13 @@ services:
       - no-new-privileges:true
     environment:
       DINDON_DB: /data/dindon.sqlite
+      DINDON_WORKSPACE: /workspace
       DINDON_LLM_BASE_URL: ${DINDON_LLM_BASE_URL:-http://host.docker.internal:8080}
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:
       - dindon-data:/data
+      - .:/workspace:ro
     stdin_open: true
     tty: true
 

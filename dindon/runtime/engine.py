@@ -1,11 +1,25 @@
-"""Single-step LLM task execution with durable intent and result checkpoints."""
+"""Checkpointed task execution with a Guardian-gated read-only tool loop."""
 
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from dindon.kernel import RecoveryAction, Step, StepState, Task, TaskState, TaskStore
 from dindon.llm import OpenAICompatibleClient, ProtocolError
+from dindon.safety import LocalGuardian
+from dindon.tools import LIST_DIR_TOOL, list_directory
+
+_SYSTEM_PROMPT = (
+    "Tu es DindonBot, un assistant personnel. Réponds dans la langue de l'utilisateur. "
+    "Tu peux utiliser list_dir pour consulter les noms visibles du workspace. "
+    "Le contenu des fichiers cachés n'est jamais accessible."
+)
+_TOOLS = [LIST_DIR_TOOL]
+_MAX_MODEL_ROUNDS = 8
 
 
 class TaskExecutionError(RuntimeError):
@@ -13,10 +27,11 @@ class TaskExecutionError(RuntimeError):
 
 
 class TaskEngine:
-    """Run an initial no-tools task against an OpenAI-compatible model endpoint.
+    """Run tasks against an OpenAI-compatible model and approved local tools.
 
-    The persisted step contains the exact request, so an interrupted model call
-    can be retried without repeating an external tool side effect.
+    Model requests and tool intents are checkpointed before external work. The
+    initial tool set is read-only and every proposed call is decided by the
+    in-process Guardian before it runs.
     """
 
     def __init__(
@@ -26,6 +41,7 @@ class TaskEngine:
         *,
         model: str,
         source: str = "runtime",
+        workspace: str | Path = ".",
     ) -> None:
         if not model:
             raise ValueError("model must not be empty")
@@ -33,18 +49,17 @@ class TaskEngine:
         self.llm = llm
         self.model = model
         self.source = source
+        self.guardian = LocalGuardian(workspace)
 
     def run(self, *, agent_id: str, goal: str) -> tuple[Task, str]:
         task = self.store.create_task(
             agent_id=agent_id,
             goal=goal,
+            input={"workspace": str(self.guardian.workspace)},
             source=self.source,
         )
         task = self.store.transition_task(
-            task.id,
-            TaskState.RUNNING,
-            source=self.source,
-            correlation_id=task.id,
+            task.id, TaskState.RUNNING, source=self.source, correlation_id=task.id
         )
         answer = self._advance(task)
         completed = self.store.get_task(task.id)
@@ -56,18 +71,18 @@ class TaskEngine:
         task = self.store.get_task(task_id)
         if task is None:
             raise KeyError(f"Task not found: {task_id}")
+        saved_workspace = task.input.get("workspace")
+        if isinstance(saved_workspace, str):
+            self.guardian = LocalGuardian(saved_workspace)
         if task.state in {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED}:
             raise TaskExecutionError(f"task is already {task.state.value}")
-        if task.state in {TaskState.WAITING_APPROVAL}:
+        if task.state == TaskState.WAITING_APPROVAL:
             raise TaskExecutionError("task is waiting for an approval flow that is not implemented yet")
         if task.state == TaskState.WAITING_INPUT and self.store.recovery_action(task_id) == RecoveryAction.NEEDS_USER:
             raise TaskExecutionError("task needs a user decision about an interrupted non-idempotent action")
         if task.state != TaskState.RUNNING:
             task = self.store.transition_task(
-                task.id,
-                TaskState.RUNNING,
-                source=self.source,
-                correlation_id=task.id,
+                task.id, TaskState.RUNNING, source=self.source, correlation_id=task.id
             )
         answer = self._advance(task)
         updated = self.store.get_task(task.id)
@@ -76,97 +91,226 @@ class TaskEngine:
         return updated, answer
 
     def _advance(self, task: Task) -> str:
-        steps = self.store.list_steps(task.id)
-        latest: Step | None = steps[-1] if steps else None
-        active_model = self.model
-        if latest is not None and latest.state == StepState.INTENT:
-            action = self.store.recovery_action(task.id)
-            if action != RecoveryAction.RETRY_MODEL:
-                raise TaskExecutionError(
-                    f"cannot resume step safely: recovery action is {action.value}"
-                )
-            messages = latest.payload.get("messages")
-            if not isinstance(messages, list):
-                raise ProtocolError("saved model-step intent has no message list")
-            stored_model = latest.payload.get("model")
-            if not isinstance(stored_model, str) or not stored_model:
-                raise ProtocolError("saved model-step intent has no model ID")
-            active_model = stored_model
-            step = latest
-        elif latest is not None and latest.state == StepState.DONE:
-            content = (latest.result or {}).get("content")
-            if not isinstance(content, str):
-                raise ProtocolError("completed model step has no text result")
-            if task.state == TaskState.RUNNING:
-                task = self.store.transition_task(
-                    task.id,
-                    TaskState.VERIFYING,
-                    source=self.source,
-                    correlation_id=task.id,
-                )
-            if task.state == TaskState.VERIFYING:
-                self.store.transition_task(
-                    task.id,
-                    TaskState.SUCCEEDED,
-                    source=self.source,
-                    correlation_id=task.id,
-                )
-            return content
-        elif latest is not None and latest.state == StepState.FAILED:
-            raise TaskExecutionError("last task step failed; automatic repair is not implemented yet")
-        else:
-            messages = [
-                {
-                    "role": "system",
-                    "content": "Tu es DindonBot, un assistant personnel. Réponds dans la langue de l'utilisateur.",
-                },
-                {"role": "user", "content": task.goal},
-            ]
+        rounds = 0
+        while True:
+            steps = self.store.list_steps(task.id)
+            latest = steps[-1] if steps else None
+
+            if latest is not None and latest.state == StepState.INTENT:
+                if latest.kind == "model":
+                    action = self.store.recovery_action(task.id)
+                    if action != RecoveryAction.RETRY_MODEL:
+                        raise TaskExecutionError(f"cannot resume model step: {action.value}")
+                    if rounds >= _MAX_MODEL_ROUNDS:
+                        raise TaskExecutionError(f"model exceeded the {_MAX_MODEL_ROUNDS}-round task limit")
+                    messages = latest.payload.get("messages")
+                    model = latest.payload.get("model")
+                    if not isinstance(messages, list) or not isinstance(model, str):
+                        raise ProtocolError("saved model intent is incomplete")
+                    self._request_model(task, latest, model, messages)
+                    rounds += 1
+                    continue
+                if latest.kind == "tool":
+                    if self.store.recovery_action(task.id) != RecoveryAction.RETRY_IDEMPOTENT_TOOL:
+                        raise TaskExecutionError("read-only tool intent is not safe to retry")
+                    self._execute_saved_tool(task, latest)
+                    continue
+
+            steps = self.store.list_steps(task.id)
+            latest_model = next(
+                (step for step in reversed(steps) if step.kind == "model" and step.state == StepState.DONE),
+                None,
+            )
+            if latest_model is not None:
+                message = self._model_message(latest_model)
+                calls = message.get("tool_calls", [])
+                if calls:
+                    completed_ids = {
+                        step.payload.get("tool_call_id")
+                        for step in steps
+                        if step.kind == "tool" and step.state == StepState.DONE
+                    }
+                    pending_calls = [
+                        call
+                        for call in calls
+                        if isinstance(call, dict)
+                        and isinstance(call.get("id"), str)
+                        and call["id"] not in completed_ids
+                    ]
+                    if pending_calls:
+                        for call in pending_calls:
+                            self._execute_tool_call(task, call)
+                        continue
+                else:
+                    content = message.get("content")
+                    if not isinstance(content, str):
+                        raise ProtocolError("completed model step has no text result")
+                    return self._succeed(task, content)
+
+            messages = self._conversation(task)
+            if rounds >= _MAX_MODEL_ROUNDS:
+                raise TaskExecutionError(f"model exceeded the {_MAX_MODEL_ROUNDS}-round task limit")
             step = self.store.start_step(
                 task.id,
                 kind="model",
-                payload={"model": self.model, "messages": messages},
+                payload={"model": self.model, "messages": messages, "tools": _TOOLS},
                 source=self.source,
                 correlation_id=task.id,
             )
+            self._request_model(task, step, self.model, messages)
+            rounds += 1
 
+    def _request_model(
+        self, task: Task, step: Step, model: str, messages: list[dict[str, Any]]
+    ) -> None:
         response = self.llm.chat_completions(
-            model=active_model,
+            model=model,
             messages=messages,
+            tools=_TOOLS,
             stream=False,
         )
         if not isinstance(response, dict):
             raise ProtocolError("non-streaming completion returned a stream")
-        choices: Any = response.get("choices")
+        choices = response.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise ProtocolError("chat completion response has no choice")
         message = choices[0].get("message")
-        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
-            raise ProtocolError("chat completion did not return text content")
-        if message.get("tool_calls"):
-            raise TaskExecutionError("model requested tools, but tool execution is not implemented yet")
-        answer = message["content"]
+        if not isinstance(message, dict):
+            raise ProtocolError("chat completion has no assistant message")
+        message = dict(message)
+        if message.get("role", "assistant") != "assistant":
+            raise ProtocolError("chat completion message role must be assistant")
+        message["role"] = "assistant"
+        if not isinstance(message.get("content"), (str, type(None))):
+            raise ProtocolError("assistant message content must be text or null")
+        calls = message.get("tool_calls", [])
+        if not isinstance(calls, list):
+            raise ProtocolError("assistant tool_calls must be a list")
+        if not calls and not isinstance(message.get("content"), str):
+            raise ProtocolError("assistant returned neither text nor tool calls")
         self.store.finish_step(
             step.id,
-            result={"content": answer, "model": response.get("model", active_model)},
+            result={"message": message, "model": response.get("model", model)},
             source=self.source,
             correlation_id=task.id,
         )
-        task = self.store.get_task(task.id)
-        if task is None:
-            raise AssertionError("task disappeared after a committed step")
-        if task.state == TaskState.RUNNING:
-            task = self.store.transition_task(
-                task.id,
-                TaskState.VERIFYING,
-                source=self.source,
-                correlation_id=task.id,
+
+    def _execute_tool_call(self, task: Task, call: dict[str, Any]) -> None:
+        call_id = call.get("id")
+        function = call.get("function")
+        if not isinstance(call_id, str) or not call_id or not isinstance(function, dict):
+            raise ProtocolError("tool call must contain an ID and function")
+        name = function.get("name")
+        raw_args = function.get("arguments", "{}")
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except json.JSONDecodeError:
+            args = {"_invalid_arguments": True}
+        if not isinstance(args, dict):
+            args = {"_invalid_arguments": True}
+        if not isinstance(name, str):
+            name = name if isinstance(name, str) else ""
+
+        self._run_tool(task, name, args, call_id)
+
+    def _execute_saved_tool(self, task: Task, step: Step) -> None:
+        name = step.payload.get("tool")
+        args = step.payload.get("args")
+        call_id = step.payload.get("tool_call_id")
+        if not isinstance(name, str) or not isinstance(args, dict) or not isinstance(call_id, str):
+            raise ProtocolError("saved tool intent is incomplete")
+        self._run_tool(task, name, args, call_id, existing_step=step)
+
+    def _run_tool(
+        self,
+        task: Task,
+        name: str,
+        args: dict[str, Any],
+        call_id: str,
+        *,
+        existing_step: Step | None = None,
+    ) -> None:
+        try:
+            canonical_args = json.dumps(
+                args, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False
             )
-        if task.state == TaskState.VERIFYING:
-            task = self.store.transition_task(
-                task.id,
-                TaskState.SUCCEEDED,
-                source=self.source,
-                correlation_id=task.id,
+        except (TypeError, ValueError):
+            args = {"_invalid_arguments": True}
+            canonical_args = '{"_invalid_arguments":true}'
+        args_hash = hashlib.sha256(canonical_args.encode("utf-8")).hexdigest()
+        step = existing_step or self.store.start_step(
+            task.id,
+            kind="tool",
+            payload={"tool": name, "args": args, "args_hash": args_hash, "tool_call_id": call_id},
+            source=self.source,
+            correlation_id=task.id,
+            tool_idempotent=True,
+            idempotency_key=call_id or uuid4().hex,
+        )
+
+        decision = self.guardian.decide(name, args)
+        try:
+            if decision.verdict != "allow":
+                raise PermissionError(decision.reason)
+            if name != "list_dir":
+                raise PermissionError("tool is not implemented")
+            output = list_directory(self.guardian.workspace, args)
+        except (OSError, ValueError, PermissionError) as exc:
+            output = json.dumps({"error": str(exc)}, ensure_ascii=False)
+        tool_message = {"role": "tool", "tool_call_id": call_id, "content": output}
+        self.store.finish_step(
+            step.id,
+            result={
+                "message": tool_message,
+                "decision": {
+                    "verdict": decision.verdict,
+                    "reason": decision.reason,
+                    "rule_id": decision.rule_id,
+                },
+                "args_hash": args_hash,
+            },
+            source=self.source,
+            correlation_id=task.id,
+        )
+
+    def _conversation(self, task: Task) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": task.goal},
+        ]
+        for step in self.store.list_steps(task.id):
+            if step.state != StepState.DONE or step.result is None:
+                continue
+            if step.kind == "model":
+                message = self._model_message(step)
+            else:
+                message = step.result.get("message")
+            if isinstance(message, dict):
+                messages.append(message)
+        return messages
+
+    @staticmethod
+    def _model_message(step: Step) -> dict[str, Any]:
+        result = step.result or {}
+        message = result.get("message")
+        if isinstance(message, dict):
+            return message
+        # Read checkpoints created by the original single-response engine.
+        content = result.get("content")
+        if isinstance(content, str):
+            return {"role": "assistant", "content": content}
+        raise ProtocolError("completed model step has no assistant message")
+
+    def _succeed(self, task: Task, answer: str) -> str:
+        current = self.store.get_task(task.id)
+        if current is None:
+            raise AssertionError("task disappeared before completion")
+        if current.state == TaskState.RUNNING:
+            current = self.store.transition_task(
+                task.id, TaskState.VERIFYING, source=self.source, correlation_id=task.id
+            )
+        if current.state == TaskState.VERIFYING:
+            self.store.transition_task(
+                task.id, TaskState.SUCCEEDED, source=self.source, correlation_id=task.id
             )
         return answer

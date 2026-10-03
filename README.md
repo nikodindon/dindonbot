@@ -634,8 +634,11 @@ dindonbot/
 Premières briques présentes : `dindon/kernel/ids.py` fournit les identifiants typés,
 `dindon/kernel/tasks.py` décrit les états et transitions d'une tâche, et
 `dindon/kernel/store.py` persiste les tâches et leur journal d'événements dans SQLite.
-Le stockage des intentions et résultats d'étapes est en place ; le runtime, les appels
-d'outils protégés par le Gardien et les sondes de reprise restent à implémenter.
+Le runtime sait poursuivre les réponses du modèle après un appel `list_dir`, dont
+l'intention et le résultat sont checkpointés. Le Gardien n'autorise que les listes
+de noms visibles dans le workspace ; le volume Docker est monté en lecture seule.
+La lecture du contenu, les écritures, le shell, le bac à sable et les approbations
+restent à implémenter.
 
 ---
 
@@ -653,7 +656,8 @@ Quatre générations : **Assistant, Agent, Équipe, Compagnon**. Chaque phase pr
 - [x] Spécification écrite des dix primitives (`docs/kernel.md`) et du modèle de menace (`docs/security.md`)
 - [x] Client LLM compatible OpenAI, découverte du modèle et streaming SSE
 - [ ] Validation de l'inférence sur le modèle local de référence (Qwen 3.6 35B MoE)
-- [ ] Boucle d'agent avec `shell`, `read/write/edit_file`, `list_dir`, `git`
+- [x] Boucle modèle/outils initiale : `list_dir` en lecture seule, avec décision du Gardien
+- [ ] Outils shell, lecture/écriture de fichiers et git ; sandbox isolé et approbations CLI
 - [x] **Task Engine initial** : tâches en SQLite, checkpoints de modèle, reprise explicite via le CLI
 - [ ] Approbations minimales en CLI
 - [x] CLI initial : `dindon chat`, `dindon task run/list/resume`
@@ -795,18 +799,18 @@ dindon task list
 dindon task run chief "résume le rôle de SQLite dans ce projet"
 ```
 
-Le CLI n'accepte pour l'instant que des endpoints LLM sur la machine locale. La conversation est une interface LLM simple ; l'exécution de tâches par des outils arrive dans une étape suivante.
+Le CLI n'accepte pour l'instant que des endpoints LLM sur la machine locale. `chat` sert aux conversations simples ; `task run` peut aussi utiliser `list_dir`, l'unique outil actif, après décision du Gardien.
 
 ```bash
 git clone https://github.com/nikodindon/dindonbot.git
 cd dindonbot
 
-cp .env.example .env            # modèle, contexte, offload, clés optionnelles (cloud)
-mkdir -p models && cp /chemin/vers/qwen-3.6-35b-moe.gguf models/
+cp .env.example .env            # URL du serveur LLM local
 
 docker compose build
 docker compose run --rm dindon chat chief
 docker compose run --rm dindon task run chief "résume le rôle de SQLite dans ce projet"
+docker compose run --rm dindon task run chief "Liste les dossiers visibles à la racine du workspace"
 ```
 
 La base persistante est dans le volume Docker `dindonbot_dindon-data`. Le démarrage comme daemon, les commandes `doctor`, `onboard` et la création de Bots sont prévus, mais pas encore implémentés.
